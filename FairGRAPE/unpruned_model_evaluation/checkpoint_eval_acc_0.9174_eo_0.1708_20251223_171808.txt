@@ -1,0 +1,408 @@
+================================================================================
+📊 체크포인트 모델 평가 결과 (가지치기 전)
+================================================================================
+
+평가 시간: 2025-12-23 17:18:08
+체크포인트: trained_model/unpruned/CelebA_unpruned_classes_bygender_mobilenetv2_0.pt
+
+--------------------------------------------------------------------------------
+📊 Performance Metrics
+--------------------------------------------------------------------------------
+Accuracy:  0.9174
+Loss:      0.1869
+BA:        0.7588
+EO:        0.1708
+--------------------------------------------------------------------------------
+
+📋 Detailed Results by Task
+--------------------------------------------------------------------------------
+
+Task 0 (X5_o_Clock_Shadow):
+  Gender=0, Class=0: 11808/11809 = 0.9999
+  Gender=0, Class=1: 1/1 = 1.0000
+  Gender=1, Class=0: 5766/6198 = 0.9303
+  Gender=1, Class=1: 1536/2252 = 0.6821
+  BA: 0.9031
+  Gender=0 - TPR: 1.0000, FPR: 0.0001
+  Gender=1 - TPR: 0.6821, FPR: 0.0697
+  EO: 0.1938
+
+Task 1 (Arched_Eyebrows):
+  Gender=0, Class=0: 5758/6856 = 0.8398
+  Gender=0, Class=1: 3539/4954 = 0.7144
+  Gender=1, Class=0: 7974/8017 = 0.9946
+  Gender=1, Class=1: 99/433 = 0.2286
+  BA: 0.6944
+  Gender=0 - TPR: 0.7144, FPR: 0.1602
+  Gender=1 - TPR: 0.2286, FPR: 0.0054
+  EO: 0.3203
+
+Task 2 (Attractive):
+  Gender=0, Class=0: 2510/3778 = 0.6644
+  Gender=0, Class=1: 7202/8032 = 0.8967
+  Gender=1, Class=0: 5430/6065 = 0.8953
+  Gender=1, Class=1: 1605/2385 = 0.6730
+  BA: 0.7823
+  Gender=0 - TPR: 0.8967, FPR: 0.3356
+  Gender=1 - TPR: 0.6730, FPR: 0.1047
+  EO: 0.2273
+
+Task 3 (Bags_Under_Eyes):
+  Gender=0, Class=0: 10289/10578 = 0.9727
+  Gender=0, Class=1: 486/1232 = 0.3945
+  Gender=1, Class=0: 4480/5458 = 0.8208
+  Gender=1, Class=1: 1882/2992 = 0.6290
+  BA: 0.7042
+  Gender=0 - TPR: 0.3945, FPR: 0.0273
+  Gender=1 - TPR: 0.6290, FPR: 0.1792
+  EO: 0.1932
+
+Task 4 (Bald):
+  Gender=0, Class=0: 11807/11807 = 1.0000
+  Gender=0, Class=1: 2/3 = 0.6667
+  Gender=1, Class=0: 7914/7998 = 0.9895
+  Gender=1, Class=1: 349/452 = 0.7721
+  BA: 0.8571
+  Gender=0 - TPR: 0.6667, FPR: 0.0000
+  Gender=1 - TPR: 0.7721, FPR: 0.0105
+  EO: 0.0580
+
+Task 5 (Bangs):
+  Gender=0, Class=0: 9087/9376 = 0.9692
+  Gender=0, Class=1: 2150/2434 = 0.8833
+  Gender=1, Class=0: 7649/7767 = 0.9848
+  Gender=1, Class=1: 546/683 = 0.7994
+  BA: 0.9092
+  Gender=0 - TPR: 0.8833, FPR: 0.0308
+  Gender=1 - TPR: 0.7994, FPR: 0.0152
+  EO: 0.0498
+
+Task 6 (Big_Lips):
+  Gender=0, Class=0: 7627/8232 = 0.9265
+  Gender=0, Class=1: 798/3578 = 0.2230
+  Gender=1, Class=0: 7018/7177 = 0.9778
+  Gender=1, Class=1: 510/1273 = 0.4006
+  BA: 0.6320
+  Gender=0 - TPR: 0.2230, FPR: 0.0735
+  Gender=1 - TPR: 0.4006, FPR: 0.0222
+  EO: 0.1145
+
+Task 7 (Big_Nose):
+  Gender=0, Class=0: 10340/10550 = 0.9801
+  Gender=0, Class=1: 384/1260 = 0.3048
+  Gender=1, Class=0: 3967/4936 = 0.8037
+  Gender=1, Class=1: 2404/3514 = 0.6841
+  BA: 0.6932
+  Gender=0 - TPR: 0.3048, FPR: 0.0199
+  Gender=1 - TPR: 0.6841, FPR: 0.1963
+  EO: 0.2779
+
+Task 8 (Black_Hair):
+  Gender=0, Class=0: 8998/9469 = 0.9503
+  Gender=0, Class=1: 1900/2341 = 0.8116
+  Gender=1, Class=0: 5485/5956 = 0.9209
+  Gender=1, Class=1: 2077/2494 = 0.8328
+  BA: 0.8789
+  Gender=0 - TPR: 0.8116, FPR: 0.0497
+  Gender=1 - TPR: 0.8328, FPR: 0.0791
+  EO: 0.0253
+
+Task 9 (Blond_Hair):
+  Gender=0, Class=0: 8664/9001 = 0.9626
+  Gender=0, Class=1: 2473/2809 = 0.8804
+  Gender=1, Class=0: 8234/8263 = 0.9965
+  Gender=1, Class=1: 77/187 = 0.4118
+  BA: 0.8128
+  Gender=0 - TPR: 0.8804, FPR: 0.0374
+  Gender=1 - TPR: 0.4118, FPR: 0.0035
+  EO: 0.2513
+
+Task 10 (Blurry):
+  Gender=0, Class=0: 11152/11249 = 0.9914
+  Gender=0, Class=1: 282/561 = 0.5027
+  Gender=1, Class=0: 7877/7942 = 0.9918
+  Gender=1, Class=1: 201/508 = 0.3957
+  BA: 0.7204
+  Gender=0 - TPR: 0.5027, FPR: 0.0086
+  Gender=1 - TPR: 0.3957, FPR: 0.0082
+  EO: 0.0537
+
+Task 11 (Brown_Hair):
+  Gender=0, Class=0: 8237/8887 = 0.9269
+  Gender=0, Class=1: 1895/2923 = 0.6483
+  Gender=1, Class=0: 6905/7161 = 0.9643
+  Gender=1, Class=1: 772/1289 = 0.5989
+  BA: 0.7846
+  Gender=0 - TPR: 0.6483, FPR: 0.0731
+  Gender=1 - TPR: 0.5989, FPR: 0.0357
+  EO: 0.0434
+
+Task 12 (Bushy_Eyebrows):
+  Gender=0, Class=0: 10920/11029 = 0.9901
+  Gender=0, Class=1: 269/781 = 0.3444
+  Gender=1, Class=0: 6124/6428 = 0.9527
+  Gender=1, Class=1: 1368/2022 = 0.6766
+  BA: 0.7410
+  Gender=0 - TPR: 0.3444, FPR: 0.0099
+  Gender=1 - TPR: 0.6766, FPR: 0.0473
+  EO: 0.1848
+
+Task 13 (Chubby):
+  Gender=0, Class=0: 11657/11663 = 0.9995
+  Gender=0, Class=1: 29/147 = 0.1973
+  Gender=1, Class=0: 7278/7468 = 0.9746
+  Gender=1, Class=1: 488/982 = 0.4969
+  BA: 0.6671
+  Gender=0 - TPR: 0.1973, FPR: 0.0005
+  Gender=1 - TPR: 0.4969, FPR: 0.0254
+  EO: 0.1623
+
+Task 14 (Double_Chin):
+  Gender=0, Class=0: 11698/11703 = 0.9996
+  Gender=0, Class=1: 18/107 = 0.1682
+  Gender=1, Class=0: 7484/7624 = 0.9816
+  Gender=1, Class=1: 383/826 = 0.4637
+  BA: 0.6533
+  Gender=0 - TPR: 0.1682, FPR: 0.0004
+  Gender=1 - TPR: 0.4637, FPR: 0.0184
+  EO: 0.1567
+
+Task 15 (Eyeglasses):
+  Gender=0, Class=0: 11512/11521 = 0.9992
+  Gender=0, Class=1: 274/289 = 0.9481
+  Gender=1, Class=0: 7404/7428 = 0.9968
+  Gender=1, Class=1: 973/1022 = 0.9521
+  BA: 0.9740
+  Gender=0 - TPR: 0.9481, FPR: 0.0008
+  Gender=1 - TPR: 0.9521, FPR: 0.0032
+  EO: 0.0032
+
+Task 16 (Goatee):
+  Gender=0, Class=0: 11809/11809 = 1.0000
+  Gender=0, Class=1: 1/1 = 1.0000
+  Gender=1, Class=0: 6948/7196 = 0.9655
+  Gender=1, Class=1: 913/1254 = 0.7281
+  BA: 0.9234
+  Gender=0 - TPR: 1.0000, FPR: 0.0000
+  Gender=1 - TPR: 0.7281, FPR: 0.0345
+  EO: 0.1532
+
+Task 17 (Gray_Hair):
+  Gender=0, Class=0: 11684/11700 = 0.9986
+  Gender=0, Class=1: 62/110 = 0.5636
+  Gender=1, Class=0: 7526/7666 = 0.9817
+  Gender=1, Class=1: 630/784 = 0.8036
+  BA: 0.8369
+  Gender=0 - TPR: 0.5636, FPR: 0.0014
+  Gender=1 - TPR: 0.8036, FPR: 0.0183
+  EO: 0.1284
+
+Task 18 (Heavy_Makeup):
+  Gender=0, Class=0: 3211/4028 = 0.7972
+  Gender=0, Class=1: 7081/7782 = 0.9099
+  Gender=1, Class=0: 8422/8428 = 0.9993
+  Gender=1, Class=1: 3/22 = 0.1364
+  BA: 0.7107
+  Gender=0 - TPR: 0.9099, FPR: 0.2028
+  Gender=1 - TPR: 0.1364, FPR: 0.0007
+  EO: 0.4878
+
+Task 19 (High_Cheekbones):
+  Gender=0, Class=0: 4676/5191 = 0.9008
+  Gender=0, Class=1: 5864/6619 = 0.8859
+  Gender=1, Class=0: 5374/5892 = 0.9121
+  Gender=1, Class=1: 1907/2558 = 0.7455
+  BA: 0.8611
+  Gender=0 - TPR: 0.8859, FPR: 0.0992
+  Gender=1 - TPR: 0.7455, FPR: 0.0879
+  EO: 0.0759
+
+Task 20 (Mouth_Slightly_Open):
+  Gender=0, Class=0: 5344/5631 = 0.9490
+  Gender=0, Class=1: 5741/6179 = 0.9291
+  Gender=1, Class=0: 4633/4840 = 0.9572
+  Gender=1, Class=1: 3263/3610 = 0.9039
+  BA: 0.9348
+  Gender=0 - TPR: 0.9291, FPR: 0.0510
+  Gender=1 - TPR: 0.9039, FPR: 0.0428
+  EO: 0.0167
+
+Task 21 (Mustache):
+  Gender=0, Class=0: 11810/11810 = 1.0000
+  Gender=0, Class=1: 0/0 = 0.0000
+  Gender=1, Class=0: 7453/7665 = 0.9723
+  Gender=1, Class=1: 407/785 = 0.5185
+  BA: 0.6227
+  Gender=0 - TPR: 0.0000, FPR: 0.0000
+  Gender=1 - TPR: 0.5185, FPR: 0.0277
+  EO: 0.2731
+
+Task 22 (Narrow_Eyes):
+  Gender=0, Class=0: 10293/10505 = 0.9798
+  Gender=0, Class=1: 431/1305 = 0.3303
+  Gender=1, Class=0: 7178/7418 = 0.9676
+  Gender=1, Class=1: 417/1032 = 0.4041
+  BA: 0.6705
+  Gender=0 - TPR: 0.3303, FPR: 0.0202
+  Gender=1 - TPR: 0.4041, FPR: 0.0324
+  EO: 0.0430
+
+Task 23 (No_Beard):
+  Gender=0, Class=0: 2/9 = 0.2222
+  Gender=0, Class=1: 11800/11801 = 0.9999
+  Gender=1, Class=0: 2825/3293 = 0.8579
+  Gender=1, Class=1: 4867/5157 = 0.9438
+  BA: 0.7559
+  Gender=0 - TPR: 0.9999, FPR: 0.7778
+  Gender=1 - TPR: 0.9438, FPR: 0.1421
+  EO: 0.3459
+
+Task 24 (Oval_Face):
+  Gender=0, Class=0: 7271/7988 = 0.9102
+  Gender=0, Class=1: 1680/3822 = 0.4396
+  Gender=1, Class=0: 6366/6610 = 0.9631
+  Gender=1, Class=1: 344/1840 = 0.1870
+  BA: 0.6250
+  Gender=0 - TPR: 0.4396, FPR: 0.0898
+  Gender=1 - TPR: 0.1870, FPR: 0.0369
+  EO: 0.1527
+
+Task 25 (Pale_Skin):
+  Gender=0, Class=0: 11030/11136 = 0.9905
+  Gender=0, Class=1: 261/674 = 0.3872
+  Gender=1, Class=0: 8213/8247 = 0.9959
+  Gender=1, Class=1: 43/203 = 0.2118
+  BA: 0.6464
+  Gender=0 - TPR: 0.3872, FPR: 0.0095
+  Gender=1 - TPR: 0.2118, FPR: 0.0041
+  EO: 0.0904
+
+Task 26 (Pointy_Nose):
+  Gender=0, Class=0: 6471/7630 = 0.8481
+  Gender=0, Class=1: 2140/4180 = 0.5120
+  Gender=1, Class=0: 6855/7056 = 0.9715
+  Gender=1, Class=1: 288/1394 = 0.2066
+  BA: 0.6345
+  Gender=0 - TPR: 0.5120, FPR: 0.1519
+  Gender=1 - TPR: 0.2066, FPR: 0.0285
+  EO: 0.2144
+
+Task 27 (Receding_Hairline):
+  Gender=0, Class=0: 11110/11192 = 0.9927
+  Gender=0, Class=1: 218/618 = 0.3528
+  Gender=1, Class=0: 7266/7444 = 0.9761
+  Gender=1, Class=1: 505/1006 = 0.5020
+  BA: 0.7059
+  Gender=0 - TPR: 0.3528, FPR: 0.0073
+  Gender=1 - TPR: 0.5020, FPR: 0.0239
+  EO: 0.0829
+
+Task 28 (Rosy_Cheeks):
+  Gender=0, Class=0: 10274/10540 = 0.9748
+  Gender=0, Class=1: 637/1270 = 0.5016
+  Gender=1, Class=0: 8417/8417 = 1.0000
+  Gender=1, Class=1: 0/33 = 0.0000
+  BA: 0.6191
+  Gender=0 - TPR: 0.5016, FPR: 0.0252
+  Gender=1 - TPR: 0.0000, FPR: 0.0000
+  EO: 0.2634
+
+Task 29 (Sideburns):
+  Gender=0, Class=0: 11808/11808 = 1.0000
+  Gender=0, Class=1: 0/2 = 0.0000
+  Gender=1, Class=0: 7123/7297 = 0.9762
+  Gender=1, Class=1: 856/1153 = 0.7424
+  BA: 0.6796
+  Gender=0 - TPR: 0.0000, FPR: 0.0000
+  Gender=1 - TPR: 0.7424, FPR: 0.0238
+  EO: 0.3831
+
+Task 30 (Smiling):
+  Gender=0, Class=0: 5193/5401 = 0.9615
+  Gender=0, Class=1: 5839/6409 = 0.9111
+  Gender=1, Class=0: 4886/5085 = 0.9609
+  Gender=1, Class=1: 2939/3365 = 0.8734
+  BA: 0.9267
+  Gender=0 - TPR: 0.9111, FPR: 0.0385
+  Gender=1 - TPR: 0.8734, FPR: 0.0391
+  EO: 0.0191
+
+Task 31 (Straight_Hair):
+  Gender=0, Class=0: 9132/9666 = 0.9448
+  Gender=0, Class=1: 1223/2144 = 0.5704
+  Gender=1, Class=0: 5659/6336 = 0.8932
+  Gender=1, Class=1: 1273/2114 = 0.6022
+  BA: 0.7526
+  Gender=0 - TPR: 0.5704, FPR: 0.0552
+  Gender=1 - TPR: 0.6022, FPR: 0.1068
+  EO: 0.0417
+
+Task 32 (Wavy_Hair):
+  Gender=0, Class=0: 5715/6598 = 0.8662
+  Gender=0, Class=1: 4140/5212 = 0.7943
+  Gender=1, Class=0: 7097/7267 = 0.9766
+  Gender=1, Class=1: 565/1183 = 0.4776
+  BA: 0.7787
+  Gender=0 - TPR: 0.7943, FPR: 0.1338
+  Gender=1 - TPR: 0.4776, FPR: 0.0234
+  EO: 0.2136
+
+Task 33 (Wearing_Earrings):
+  Gender=0, Class=0: 7586/8167 = 0.9289
+  Gender=0, Class=1: 2598/3643 = 0.7131
+  Gender=1, Class=0: 8305/8325 = 0.9976
+  Gender=1, Class=1: 20/125 = 0.1600
+  BA: 0.6999
+  Gender=0 - TPR: 0.7131, FPR: 0.0711
+  Gender=1 - TPR: 0.1600, FPR: 0.0024
+  EO: 0.3109
+
+Task 34 (Wearing_Hat):
+  Gender=0, Class=0: 11457/11500 = 0.9963
+  Gender=0, Class=1: 262/310 = 0.8452
+  Gender=1, Class=0: 7729/7780 = 0.9934
+  Gender=1, Class=1: 630/670 = 0.9403
+  BA: 0.9438
+  Gender=0 - TPR: 0.8452, FPR: 0.0037
+  Gender=1 - TPR: 0.9403, FPR: 0.0066
+  EO: 0.0490
+
+Task 35 (Wearing_Lipstick):
+  Gender=0, Class=0: 1495/2276 = 0.6569
+  Gender=0, Class=1: 9098/9534 = 0.9543
+  Gender=1, Class=0: 8379/8397 = 0.9979
+  Gender=1, Class=1: 16/53 = 0.3019
+  BA: 0.7277
+  Gender=0 - TPR: 0.9543, FPR: 0.3431
+  Gender=1 - TPR: 0.3019, FPR: 0.0021
+  EO: 0.4967
+
+Task 36 (Wearing_Necklace):
+  Gender=0, Class=0: 9120/9480 = 0.9620
+  Gender=0, Class=1: 596/2330 = 0.2558
+  Gender=1, Class=0: 8301/8315 = 0.9983
+  Gender=1, Class=1: 6/135 = 0.0444
+  BA: 0.5651
+  Gender=0 - TPR: 0.2558, FPR: 0.0380
+  Gender=1 - TPR: 0.0444, FPR: 0.0017
+  EO: 0.1238
+
+Task 37 (Wearing_Necktie):
+  Gender=0, Class=0: 11807/11807 = 1.0000
+  Gender=0, Class=1: 1/3 = 0.3333
+  Gender=1, Class=0: 6668/6995 = 0.9533
+  Gender=1, Class=1: 1127/1455 = 0.7746
+  BA: 0.7653
+  Gender=0 - TPR: 0.3333, FPR: 0.0000
+  Gender=1 - TPR: 0.7746, FPR: 0.0467
+  EO: 0.2440
+
+Task 38 (Young):
+  Gender=0, Class=0: 779/1429 = 0.5451
+  Gender=0, Class=1: 10142/10381 = 0.9770
+  Gender=1, Class=0: 2338/3072 = 0.7611
+  Gender=1, Class=1: 4947/5378 = 0.9199
+  BA: 0.8008
+  Gender=0 - TPR: 0.9770, FPR: 0.4549
+  Gender=1 - TPR: 0.9199, FPR: 0.2389
+  EO: 0.1365
