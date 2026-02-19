@@ -975,7 +975,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
     import config
     from scipy.stats import rankdata
     
-    beta = 55.0
+    beta = 50.0
 
     hybrid_importance = {}
 
