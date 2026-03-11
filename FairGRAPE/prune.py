@@ -19,7 +19,7 @@ import torchvision.models as models
 
 # 사용자 정의 코드들
 from train_and_val import loss_multi_tasks
-from util import make_model, custom_forward_conv2d, custom_forward_conv1d, custom_forward_linear
+from util import make_model, custom_forward_conv2d, custom_forward_conv1d, custom_forward_linear, safe_forward_with_cudnn_fallback
 from dataset import split_image_name, make_datasets
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -178,7 +178,7 @@ class SNIP(Prunner):
             if i == num_batch_sampling:
                 break
             data, labels = data.to(device), labels.to(device)
-            out = self.model(data)
+            out = safe_forward_with_cudnn_fallback(self.model, data)
             loss = loss_multi_tasks(out, labels, self.criterion, self.output_cols_each_task, False)
             self.model.zero_grad()
             loss.backward()
@@ -681,7 +681,7 @@ def compute_model_eo(model, test_loader, sensitive_idx, stop_batch=10):
             labels = labels.to(device)
             
             # 예측 수행
-            outputs = model(data)
+            outputs = safe_forward_with_cudnn_fallback(model, data)
             probs = torch.sigmoid(outputs)  # sigmoid 적용
             preds = (probs > 0.5).float()  # 임계값 0.5로 이진 분류
             
@@ -975,7 +975,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
     import config
     from scipy.stats import rankdata
     
-    beta = 50.0
+    beta = 1.0
 
     hybrid_importance = {}
 
@@ -1105,14 +1105,20 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'],network=None,optimizer=None, lr=1e-4, stop_batch=10000, sensitive_group=None, sensitive_classes=None):
     
     print("-------------compute_importance-------------")
-    torch.autograd.set_detect_anomaly(True)
+    torch.autograd.set_detect_anomaly(False)  # [CHANGED] True -> False (안정성/속도)
 
-    # 0) model의 mask를 모아둠 (compute_importance 시작 부분에)
+    # [CHANGED] 로그/배치 고정값
+    log_every = 100
+    imp_batch_size = 384
+    print(f"log_every={log_every}")
+    print(f"compute_importance batch_size={imp_batch_size}")
+
+    # 0) model의 mask를 모아둠
     def collect_masks_from(model):
         masks = {}
         for n, m in model.named_modules():
             if hasattr(m, 'mask'):
-                masks[n] = m.mask.detach().cpu().clone()
+                masks[n] = m.mask.detach().clone()  # [CHANGED] cpu 강제 제거
         return masks
 
     model_masks = collect_masks_from(model)
@@ -1120,46 +1126,38 @@ def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_g
     def is_classifier_head(name):  # MobileNetV2 기준
         return name.startswith('classifier.')
 
-    
-    
-    supported_layers = ['Linear', 'Conv2d', 'Conv1d'] # 점수를 계산할 레이어 선정
+    supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 
-    #! 1) 모델 로드 & 준비
-    model.train() # 학습 모드로 전환
-    gender_model.train()
+    #! 1) 모델 준비
+    model.eval()        # [CHANGED] train() -> eval() (BN 안정화)
+    gender_model.eval() # [CHANGED] train() -> eval()
 
-    #! 2) 옵티마이저 준비
-    #if optimizer is None:
-    #    optimizer = optim.Adam(model.parameters(), lr=lr)
-    #    gender_optimizer = optim.Adam(gender_model.parameters(), lr=lr)
-    
-    #! 3) 데이터 준비
+    #! 2) 데이터 준비
     if isinstance(test_csv, str):
         test_frame = pd.read_csv(test_csv)
     else:
         test_frame = test_csv.copy()
 
-    if new_img_dir: # 새로운 디렉토리 경로가 주어졌다면, 해당 디렉토리에 이미 이미 존재하는 이미지만 필터링
+    if new_img_dir:
         faces = set(os.listdir(new_img_dir))
-        faces_found = 0
         new_face_name = []
         face_found_mask = []
         for i in range(test_frame.shape[0]):
             face_name_align = split_image_name(test_frame['face_name_align'][i])
             face_found_mask.append(face_name_align in faces)
             if face_name_align in faces:
-                faces_found += 1
                 new_face_name.append(os.path.join(new_img_dir, face_name_align))
         test_frame = test_frame[face_found_mask].reset_index(drop=True)
         test_frame['face_name_align'] = new_face_name
 
-    # 데이터 로더 준비
-    test_loader,_ =  make_datasets(test_frame,test_frame,True, 448, col_used=col_names)
+    # [CHANGED] 배치 크기 고정 64
+    test_loader, _ = make_datasets(test_frame, test_frame, True, imp_batch_size, col_used=col_names)
+    print(f"compute_importance 배치 수: {min(len(test_loader), stop_batch)}/{len(test_loader)} (batch_size={imp_batch_size})")
 
-    #! 4) 손실 함수
+    #! 3) 손실 함수
     criterion = nn.CrossEntropyLoss()
 
-    #! 5) 누적 딕셔너리 초기화
+    #! 4) 누적 딕셔너리 초기화
     imp_grad_accum = {}
     gender_grad_accum = {}
     importance_score = {}
@@ -1167,131 +1165,123 @@ def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_g
     mask_at_each_layer = {}
     batches_imp = 0
 
+    # [CHANGED] cuDNN 전역 상태 저장/비활성 (함수 범위)
+    prev_cudnn_enabled = torch.backends.cudnn.enabled
+    prev_cudnn_benchmark = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.enabled = False
+    torch.backends.cudnn.benchmark = False
 
-    #! 6) 배치(이미지)별 순환
-        #! 1. 미니-배치마다 순전파 → 손실 → 역전파로 모든 가중치의 그래디언트 계산
-        #! 2. 레이별 가중치의 그래디언트 복사(clone().detach().cpu())
-        #! 3. 가지치기된 가중치의 그래디언트를 0으로 
-        #! 4. 가중치와 가중치의 그래디언트을 곱한 결과의 제곱으로 중요도를 근사
-        #! 5. 배치마다 구해진 해당 가중치의 근사 값을 누적하고 배치 개수로 나눠서 최종 가중치의 중요도 값의 평균 도출
+    try:
+        #! 5) Task importance
+        for batch_idx, sample_batched in enumerate(test_loader):
+            if batch_idx >= stop_batch:
+                break
+            batches_imp += 1
+            if batch_idx % log_every == 0:  # [CHANGED]
+                print(f"{batch_idx}번째 mini-batch acc_imp 계산 중!")
 
-    for batch_idx, sample_batched in enumerate(test_loader):
-        if batch_idx >= stop_batch:
-            break
-        batches_imp += 1
-        if batch_idx % 200 == 0:
-            print(f"{batch_idx}번째 mini-batch acc_imp 계산 중!")
+            image_batched, label_batched = sample_batched
+            image_batched = image_batched.to(device, dtype=torch.float, non_blocking=True).contiguous()  # [CHANGED]
+            label_batched = label_batched.to(device, non_blocking=True)
 
-        # (1) 배치 데이터 준비
-        image_batched, label_batched = sample_batched 
-        image_batched = image_batched.to(device, dtype=torch.float)
-        label_batched = label_batched.to(device)
+            model.zero_grad(set_to_none=True)  # [CHANGED]
+            with torch.backends.cudnn.flags(enabled=False):  # [CHANGED]
+                outputs = safe_forward_with_cudnn_fallback(model, image_batched)
 
-        # (2) 이전 배치 그래디언트 초기화
-       
+            imp_loss = loss_multi_tasks(outputs, label_batched, criterion, output_cols_each_task)
+            imp_loss.backward()
 
-        # (3) 순전파 → 손실 계산 → 역전파
-        outputs = model(image_batched)
-        imp_loss = loss_multi_tasks(outputs, label_batched, criterion, output_cols_each_task)
-        model.zero_grad()
-        imp_loss.backward() # 전체 가중치의 그래디언트 구하기
+            for name, layer in model.named_modules():
+                if type(layer).__name__ not in supported_layers:
+                    continue
+                if not hasattr(layer, 'weight') or layer.weight.grad is None:
+                    continue
 
-        # (4) 레이어별 그래디언트 읽어서 누적
-        for name, layer in model.named_modules(): 
-            if type(layer).__name__ not in supported_layers:
-                continue
-            # (4-1) gradient
-            grads = layer.weight.grad.clone().detach().cpu() # 현재 배치의 그래디언트 복사
-            
-            # (4-2) mask 적용 (pruned weight 제외)
-            if masked_grads and hasattr(layer, 'mask'):
-                masks = layer.mask.clone().detach().cpu() # 이전에 저장되었던 마스크 값 가져오기
-                mask_at_each_layer[name] = [int(masks.sum()), grads.shape]
-                grads *= masks # 마스크에 비활성화 처리된 가중치는 모두 0으로 처리
-                    
-                # (4-3) 테일러 급수를 이용한 근사 - (그래디언트*가중치)^2
-                weights = layer.weight.data.clone().detach().cpu()
-                hess = (weights.abs() * grads.abs())**2
-            
-            # (4-4) 미니 배치에 대한 레이어별 각 가중치 그래디언트/테일러 급수 근사 결과 누적합
-            if name not in imp_grad_accum:
-                imp_grad_accum[name] = grads
-                importance_score[name] = hess
-            else:
-                imp_grad_accum[name] += grads # 배치마다 grads 텐서(모든 weight별 gradient)를 더하고
-                importance_score[name] += hess
-        
-        #optimizer.step()
+                grads = layer.weight.grad.detach().clone()
+                weights = layer.weight.detach().clone()
 
+                if masked_grads and hasattr(layer, 'mask'):
+                    masks = layer.mask.detach().clone()
+                    if masks.device != grads.device:  # [CHANGED] 디바이스 정렬
+                        masks = masks.to(grads.device)
+                    mask_at_each_layer[name] = [int(masks.sum().item()), grads.shape]
+                    grads = grads * masks
 
-        # TODO: gender_imp 근사--------------------------------------------------------------------------------
-    batches_gender = 0    
-    for batch_idx, sample_batched in enumerate(test_loader):
-        if batch_idx >= stop_batch:
-            break
-        batches_gender += 1
-        if batch_idx % 200 == 0:
-            print(f"{batch_idx}번째 mini-batch gender_imp 중요도 계산 중!")
+                hess = (weights.abs() * grads.abs()) ** 2  # [CHANGED] masked_grads와 무관하게 항상 계산
 
-        image_batched, label_batched = sample_batched 
-        image_batched = image_batched.to(device, dtype=torch.float)
-        gender_labels = label_batched[:, -1].long().to(device)
-        image_batched_detached = image_batched.detach().requires_grad_(True) # gender_model의 계산이 model의 계산 상태에 절대 영향을 받지 않도록
+                if name not in imp_grad_accum:
+                    imp_grad_accum[name] = grads
+                    importance_score[name] = hess
+                else:
+                    imp_grad_accum[name] += grads
+                    importance_score[name] += hess
 
-        
-        outputs = gender_model(image_batched_detached)
-        gender_loss = criterion(outputs, gender_labels)
-        gender_model.zero_grad()
-        gender_loss.backward()
+        #! 6) Gender importance
+        batches_gender = 0
+        for batch_idx, sample_batched in enumerate(test_loader):
+            if batch_idx >= stop_batch:
+                break
+            batches_gender += 1
+            if batch_idx % log_every == 0:  # [CHANGED]
+                print(f"{batch_idx}번째 mini-batch gender_imp 중요도 계산 중!")
 
-        for name, layer in gender_model.named_modules():
-            if type(layer).__name__ not in supported_layers:
-                continue
-            if not hasattr(layer, 'weight') or layer.weight.grad is None:
-                continue
+            image_batched, label_batched = sample_batched
+            image_batched = image_batched.to(device, dtype=torch.float, non_blocking=True).contiguous()  # [CHANGED]
+            gender_labels = label_batched[:, -1].long().to(device, non_blocking=True)
 
-            grads   = layer.weight.grad.detach().cpu().clone()
-            weights = layer.weight.detach().cpu().clone()
+            gender_model.zero_grad(set_to_none=True)  # [CHANGED]
+            with torch.backends.cudnn.flags(enabled=False):  # [CHANGED]
+                outputs = safe_forward_with_cudnn_fallback(gender_model, image_batched)
 
-            # --- 마스크 적용 규칙 ---
-            # 1) 분류기 헤드는 마스킹 "제외"
-            # 2) 그 외 레이어는 model의 동일 레이어 마스크가 있으면 적용
-            mask = None if is_classifier_head(name) else model_masks.get(name, None)
-            if masked_grads and mask is not None and mask.shape == grads.shape:
-                grads *= mask              # hess 계산 "직전"에 grad 마스킹
+            gender_loss = criterion(outputs, gender_labels)
+            gender_loss.backward()
 
-            # hess 계산 (항상)
-            hess = (weights * grads).pow(2)
+            for name, layer in gender_model.named_modules():
+                if type(layer).__name__ not in supported_layers:
+                    continue
+                if not hasattr(layer, 'weight') or layer.weight.grad is None:
+                    continue
 
-            # (선택) 한 번 더 보증 차원에서 hess에도 마스킹
-            if masked_grads and mask is not None and mask.shape == hess.shape:
-                hess *= mask
+                grads = layer.weight.grad.detach().clone()
+                weights = layer.weight.detach().clone()
 
-            # 누적
-            if name not in gender_grad_accum:
-                gender_grad_accum[name] = grads
-                gender_score[name] = hess
-            else:
-                gender_grad_accum[name] += grads
-                gender_score[name] += hess
-        #gender_optimizer.step()
+                mask = None if is_classifier_head(name) else model_masks.get(name, None)
+                if masked_grads and mask is not None and mask.shape == grads.shape:
+                    if mask.device != grads.device:  # [CHANGED] 디바이스 정렬
+                        mask = mask.to(grads.device)
+                    grads = grads * mask
 
+                hess = (weights * grads).pow(2)
 
-    #! 7) 모든 배치 처리 후에 평균 내기
-    for name in imp_grad_accum:
-        imp_grad_accum[name] /= batches_imp
-        importance_score[name] /= batches_imp
-        # 미니 배치에 대한 레이어별 각 가중치 그래디언트 누적합을 배치 수로 전체 배치에 대한 특정 가중치의 그래디언트 평균 구하기
-    #print(f"**{name}레이어의 importance_score: {importance_score[name]}**")
+                if masked_grads and mask is not None and mask.shape == hess.shape:
+                    if mask.device != hess.device:
+                        mask = mask.to(hess.device)
+                    hess = hess * mask
 
-    for name in gender_grad_accum:
-        gender_grad_accum[name] /= batches_gender
-        gender_score[name] /= batches_gender
-        # 미니 배치에 대한 레이어별 각 가중치 그래디언트 누적합을 배치 수로 전체 배치에 대한 특정 가중치의 그래디언트 평균 구하기
-    #print(f"**{name}레이어의 eo_score: {eo_score[name]}**")
+                if name not in gender_grad_accum:
+                    gender_grad_accum[name] = grads
+                    gender_score[name] = hess
+                else:
+                    gender_grad_accum[name] += grads
+                    gender_score[name] += hess
 
-    
-    # 🔍 디버깅: 계산된 레이어 확인
+    finally:
+        # [CHANGED] cuDNN 상태 복구
+        torch.backends.cudnn.enabled = prev_cudnn_enabled
+        torch.backends.cudnn.benchmark = prev_cudnn_benchmark
+
+    #! 7) 평균
+    if batches_imp > 0:
+        for name in imp_grad_accum:
+            imp_grad_accum[name] /= batches_imp
+            importance_score[name] /= batches_imp
+
+    if batches_gender > 0:
+        for name in gender_grad_accum:
+            gender_grad_accum[name] /= batches_gender
+            gender_score[name] /= batches_gender
+
+    # 디버깅 출력
     print("\n🔍 Importance Score 계산된 레이어:")
     for name in importance_score.keys():
         print(f"  ✓ {name}: shape={importance_score[name].shape}")
@@ -1299,8 +1289,7 @@ def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_g
     print("\n🔍 Gender Score 계산된 레이어:")
     for name in gender_score.keys():
         print(f"  ✓ {name}: shape={gender_score[name].shape}")
-    
-    # (8-5) 최종 return 시 gender_score도 함께 반환하도록 변경
+
     return importance_score, gender_score
 
 
@@ -1371,7 +1360,7 @@ def importance_by_class0(model_path, test_csv, new_img_dir=None, masked_grads=Tr
             gradients = {}
             hessians = {}
             obs_this_group = torch.squeeze((label_batched[:, sensitive_cols_in_target] == group).nonzero())
-            outputs = model(image_batched)
+            outputs = safe_forward_with_cudnn_fallback(model, image_batched)
             output_cols_for_non_protected = output_cols_each_task[:(len(output_cols_each_task))]
             outputs_this_group = outputs[obs_this_group,:].view(-1,outputs.shape[1])
             if outputs_this_group.shape[0] < 1 or len(outputs_this_group.shape) < 2:
@@ -1444,7 +1433,7 @@ def importance_by_class1(model_path, test_csv, new_img_dir=None, masked_grads=Tr
     sensitive_groups = sorted([[int(i) for i in comb.split('_')] for comb in comb_idx])
     sensitive_group_idx_in_output = [i for i in range(len(sensitive_groups))]
 
-    outputs = torch.squeeze(model(images.to(device)))
+    outputs = torch.squeeze(safe_forward_with_cudnn_fallback(model, images.to(device)))
 
     grad_each_group = {}
     H_each_group = {}
@@ -1554,7 +1543,7 @@ def importance_by_class2(model_path, test_csv, new_img_dir=None, output_cols = [
     num_classes = output_cols[0][1] - output_cols[0][0]
     images, targets, comb_idx = fetch_a_fair_batch(test_loader, num_classes, sample_per_class,target_col)
 
-    outputs = torch.squeeze(model(images.to(device)))
+    outputs = torch.squeeze(safe_forward_with_cudnn_fallback(model, images.to(device)))
 
     group_outputs = outputs
     group_targets = torch.squeeze(targets[:, target_col]).to(device)

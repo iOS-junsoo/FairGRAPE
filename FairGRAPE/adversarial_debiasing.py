@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.autograd import Function
+from util import safe_forward_with_cudnn_fallback
 
 ############################################################################
 # Gradient Reversal Layer (GRL)
@@ -93,13 +94,18 @@ class DebiasedModelWrapper(nn.Module):
             
             # Feature dimension 계산
             with torch.no_grad():
-                # 🔥 수정: dummy_input을 모델과 같은 디바이스로
-                dummy_input = torch.randn(1, 3, 224, 224).to(device)
-                features = self.feature_extractor(dummy_input)
-                if hasattr(self, 'avgpool'):
-                    features = self.avgpool(features)
-                features = torch.flatten(features, 1)
-                feature_dim = features.shape[1]
+                # cuDNN 비활성화 (커스텀 mask conv + BN 안정성)
+                prev_cudnn = torch.backends.cudnn.enabled
+                torch.backends.cudnn.enabled = False
+                try:
+                    dummy_input = torch.randn(1, 3, 224, 224).to(device)
+                    features = self.feature_extractor(dummy_input)
+                    if hasattr(self, 'avgpool'):
+                        features = self.avgpool(features)
+                    features = torch.flatten(features, 1)
+                    feature_dim = features.shape[1]
+                finally:
+                    torch.backends.cudnn.enabled = prev_cudnn
         
         elif hasattr(base_model, 'fc'):
             # Custom model with fc layer
@@ -111,12 +117,17 @@ class DebiasedModelWrapper(nn.Module):
             
             # Feature dimension
             with torch.no_grad():
-                # 🔥 수정: dummy_input을 모델과 같은 디바이스로
-                dummy_input = torch.randn(1, 3, 224, 224).to(device)
-                features = self.feature_extractor(dummy_input)
-                features = self.avgpool(features)
-                features = torch.flatten(features, 1)
-                feature_dim = features.shape[1]
+                # cuDNN 비활성화 (커스텀 mask conv + BN 안정성)
+                prev_cudnn = torch.backends.cudnn.enabled
+                torch.backends.cudnn.enabled = False
+                try:
+                    dummy_input = torch.randn(1, 3, 224, 224).to(device)
+                    features = self.feature_extractor(dummy_input)
+                    features = self.avgpool(features)
+                    features = torch.flatten(features, 1)
+                    feature_dim = features.shape[1]
+                finally:
+                    torch.backends.cudnn.enabled = prev_cudnn
         
         else:
             raise ValueError("모델 구조를 분석할 수 없습니다. features/classifier 또는 fc 속성이 필요합니다.")
@@ -144,7 +155,7 @@ class DebiasedModelWrapper(nn.Module):
             features (optional): 특징 벡터 (B, feature_dim)
         """
         # Feature extraction
-        features = self.feature_extractor(x)
+        features = safe_forward_with_cudnn_fallback(self.feature_extractor, x)
         
         # Global average pooling
         if hasattr(self, 'avgpool'):
@@ -154,11 +165,11 @@ class DebiasedModelWrapper(nn.Module):
         features = torch.flatten(features, 1)
         
         # Task prediction (라벨 예측)
-        task_logits = self.task_predictor(features)
+        task_logits = safe_forward_with_cudnn_fallback(self.task_predictor, features)
         
         # Gender prediction through GRL
         reversed_features = self.grl(features)
-        gender_logits = self.gender_classifier(reversed_features)
+        gender_logits = safe_forward_with_cudnn_fallback(self.gender_classifier, reversed_features)
         
         if return_features:
             return task_logits, gender_logits, features

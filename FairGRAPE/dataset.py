@@ -135,7 +135,6 @@ def add_imbalance(frame):
 
 # csv 파일을 불러와서 new_face_dir 에 저장된 이미지와 매핑, 그리고 train/val/test로 분할
 def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=False, imbalance=False):
-    device = torch.device('cuda:0')
     frame = pd.read_csv(csv)
     frame.head()
 
@@ -321,7 +320,6 @@ class FaceDataset(Dataset):
 
 # 학습용 데이터로더와 테스트용 데이터로더를 만드는 함수
 def make_datasets(train_frame, val_frame, give_dataloader=True, batch_size=64, col_used=None):
-    device = torch.device('cuda:0')
     transform_train_data = transforms.Compose([
         ImgAugTransform(),
         lambda x: PIL.Image.fromarray(x),

@@ -18,6 +18,26 @@ import torchvision
 from dataset import split_image_name
 
 
+def is_cudnn_runtime_error(error):
+    err = str(error)
+    return (
+        "CUDNN_STATUS_EXECUTION_FAILED" in err
+        or "Unable to find a valid cuDNN algorithm" in err
+        or "CUDNN_STATUS_NOT_SUPPORTED" in err
+        or "cuDNN error" in err
+    )
+
+
+def safe_forward_with_cudnn_fallback(forward_fn, *args, **kwargs):
+    try:
+        return forward_fn(*args, **kwargs)
+    except RuntimeError as e:
+        if not is_cudnn_runtime_error(e):
+            raise
+        with torch.backends.cudnn.flags(enabled=False):
+            return forward_fn(*args, **kwargs)
+
+
 # -----------------------------------------------------------------------------
 # 1) 사전 학습(Pretrained) 모델 생성 함수
 #    - pruning 인자를 통해 (추가적인 로직이 있다면) 분기할 수도 있음
@@ -142,7 +162,7 @@ def check_fairness0(trained_model,
         image = trans(image)
         image = image.view(1, *image.shape).to(device)
 
-        output_i = model(image).cpu().detach().numpy()  # [1, n_class] 형태
+        output_i = safe_forward_with_cudnn_fallback(model, image).cpu().detach().numpy()  # [1, n_class] 형태
         outputs = np.squeeze(output_i)                  # [n_class]
 
         for col, (start_idx, end_idx) in zip(col_used, output_cols_each_task):
@@ -415,11 +435,20 @@ def save_output(best_model, cfgs, csv_savedir="fair_dfs", save_file=True):
 # -----------------------------------------------------------------------------
 def custom_forward_conv2d(self, x):
     # print(f"Conv2d 레이어에 전달: mask.shape = {self.mask.shape}")
-    return F.conv2d(x, self.weight * self.mask, self.bias,
-                    self.stride, self.padding, self.dilation, self.groups)
+    masked_weight = self.weight * self.mask
+    return safe_forward_with_cudnn_fallback(
+        F.conv2d,
+        x,
+        masked_weight,
+        self.bias,
+        self.stride,
+        self.padding,
+        self.dilation,
+        self.groups,
+    )
 
 def custom_forward_conv1d(self, x):
-    return F.conv1d(x, self.weight * self.mask, self.bias)
+    return safe_forward_with_cudnn_fallback(F.conv1d, x, self.weight * self.mask, self.bias)
 
 def custom_forward_linear(self, x):
     return F.linear(x, self.weight * self.mask, self.bias)

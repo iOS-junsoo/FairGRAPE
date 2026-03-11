@@ -11,7 +11,7 @@ import numpy as np
 
 from dataset import make_frame, make_datasets, prepare_ImageNet
 from prune import WS, SNIP, GraSP, Lottery, FairGRAPE, Importance, Random, save_impt_df
-from util import make_model, save_model, save_output, download_dataset, show_acc_df, setseed, save_unpruned_model, print_acc_scores
+from util import make_model, save_model, save_output, download_dataset, show_acc_df, setseed, save_unpruned_model, print_acc_scores, safe_forward_with_cudnn_fallback
 from train_and_val import train, loss_multi_tasks
 
 # 가지치기(Pruning) 기법을 선택하기 위한 매핑
@@ -328,7 +328,7 @@ def experiment(args):
                     task_labels = label_batched[:, 0:len(col_used_training)]
                     gender_batched = label_batched[:, -1]
                     
-                    outputs = torch.squeeze(best_model(image_batched))
+                    outputs = torch.squeeze(safe_forward_with_cudnn_fallback(best_model, image_batched))
                     loss, acc = loss_multi_tasks(outputs, label_batched, criterion, 
                                             output_cols_each_task, True)
                     

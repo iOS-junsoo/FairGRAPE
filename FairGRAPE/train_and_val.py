@@ -107,6 +107,10 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
      sensitive_group, exp_idx) = cfgs
 
     device = torch.device('cuda:0')
+    prev_cudnn_enabled = torch.backends.cudnn.enabled
+    prev_cudnn_benchmark = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.enabled = False
+    torch.backends.cudnn.benchmark = False
     print("\n" + "="*80)
     print(f"🚀 학습 시작 | Debiasing: {use_debiasing} | Pruning Rate: {prune_rate}")
     print("="*80)
@@ -163,6 +167,28 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             hook_handle = training_model.grl.register_full_backward_hook(check_grl_hook)
             print("✨ GRL 검증 훅 등록됨")
 
+    cudnn_fallback_notified = False
+
+    def safe_model_forward(input_batch):
+        nonlocal cudnn_fallback_notified
+        try:
+            return training_model(input_batch)
+        except RuntimeError as e:
+            err = str(e)
+            is_cudnn_runtime_error = (
+                "CUDNN_STATUS_EXECUTION_FAILED" in err
+                or "Unable to find a valid cuDNN algorithm" in err
+                or "CUDNN_STATUS_NOT_SUPPORTED" in err
+                or "cuDNN error" in err
+            )
+            if not is_cudnn_runtime_error:
+                raise
+            if not cudnn_fallback_notified:
+                print(f"[경고] 학습 forward 중 cuDNN 실패로 cuDNN 비활성 재시도: {e}")
+                cudnn_fallback_notified = True
+            with torch.backends.cudnn.flags(enabled=False):
+                return training_model(input_batch)
+
     best_model_wts = copy.deepcopy(training_model.state_dict())
     best_optimizer_state = copy.deepcopy(optimizer.state_dict())
     best_acc = 0.0
@@ -218,10 +244,10 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     # ----------------------------------------------------------
                     if use_debiasing:
                         # Train, Test 모두 gender_outputs를 받아옵니다.
-                        task_outputs, gender_outputs = training_model(image_batched)
+                        task_outputs, gender_outputs = safe_model_forward(image_batched)
                         outputs = task_outputs # 메인 태스크용 출력
                     else:
-                        outputs = torch.squeeze(training_model(image_batched))
+                        outputs = torch.squeeze(safe_model_forward(image_batched))
                         gender_outputs = None
 
                     # ----------------------------------------------------------
@@ -284,10 +310,10 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                 # 🔥 EO 통계 누적 (기존 로직 유지)
                 # Test phase에서만 정확한 예측을 위해 outputs 재계산
                 if use_debiasing:
-                    task_outputs_for_stats, _ = training_model(image_batched)
+                    task_outputs_for_stats, _ = safe_model_forward(image_batched)
                     outputs_for_stats = task_outputs_for_stats
                 else:
-                    outputs_for_stats = torch.squeeze(training_model(image_batched))
+                    outputs_for_stats = torch.squeeze(safe_model_forward(image_batched))
                 
                 for task_idx, (st, ed) in enumerate(output_cols_each_task):
                     task_out = outputs_for_stats[:, st:ed]
@@ -562,6 +588,9 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")
 
     # 🔥 Debiasing 모드면 원래 모델 반환
+    torch.backends.cudnn.enabled = prev_cudnn_enabled
+    torch.backends.cudnn.benchmark = prev_cudnn_benchmark
+
     if use_debiasing:
         final_model = training_model.get_base_model()
         print("\n✅ Debiased 모델에서 Base 모델 추출 완료")
@@ -1130,4 +1159,3 @@ def loss_multi_tasks(outputs, labels, criterion=None, output_cols_each_task=[(0,
         return loss, acc
     else:
         return loss
-
