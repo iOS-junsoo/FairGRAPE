@@ -93,6 +93,85 @@ def check_imgs(frame, new_img_dir):
     return frame
 
 
+def filter_readable_images(frame, image_col='face_name_align', loader='dlib'):
+    filtered_frame = frame.copy().reset_index(drop=True)
+    total_rows = filtered_frame.shape[0]
+    valid_mask = []
+    bad_files = []
+
+    if total_rows == 0:
+        print("읽기 가능한 이미지 확인 완료: 0 / 0")
+        return filtered_frame
+
+    dlib_module = None
+    if loader == 'dlib':
+        import dlib as dlib_module
+
+    for image_path in filtered_frame[image_col]:
+        try:
+            if loader == 'dlib':
+                dlib_module.load_rgb_image(image_path)
+            else:
+                with Image.open(image_path) as image:
+                    image.convert('RGB')
+            valid_mask.append(True)
+        except Exception:
+            valid_mask.append(False)
+            bad_files.append(image_path)
+
+    filtered_frame = filtered_frame[np.asarray(valid_mask, dtype=bool)].reset_index(drop=True)
+
+    removed_count = total_rows - filtered_frame.shape[0]
+    if removed_count > 0:
+        print(f"읽을 수 없는 이미지 {removed_count}개를 제외했습니다.")
+        preview_count = min(10, len(bad_files))
+        for image_path in bad_files[:preview_count]:
+            print(f"  - 제외됨: {image_path}")
+        if len(bad_files) > preview_count:
+            print(f"  - 추가 제외 파일 {len(bad_files) - preview_count}개")
+    else:
+        print(f"읽기 가능한 이미지 확인 완료: {total_rows} / {total_rows}")
+
+    return filtered_frame
+
+
+def write_unreadable_image_report(report_path, split_name, total_rows, removed_count, bad_files):
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    with open(report_path, 'w', encoding='utf-8') as handle:
+        handle.write(f"split: {split_name}\n")
+        handle.write(f"total_rows: {total_rows}\n")
+        handle.write(f"removed_rows: {removed_count}\n")
+        handle.write("unreadable_files:\n")
+        for image_path in bad_files:
+            handle.write(f"{image_path}\n")
+
+
+def filter_readable_images_in_frames(frames, image_col='face_name_align', loader='dlib', report_dir=None, report_prefix='excluded_images'):
+    filtered_frames = {}
+    for split_name, frame in frames.items():
+        print(f"[{split_name}] 이미지 가독성 검사 시작")
+        total_rows = frame.shape[0]
+        filtered_frame = filter_readable_images(
+            frame,
+            image_col=image_col,
+            loader=loader,
+        )
+        filtered_frames[split_name] = filtered_frame
+
+        if report_dir is not None:
+            filtered_paths = set(filtered_frame[image_col].tolist())
+            bad_files = [image_path for image_path in frame[image_col].tolist() if image_path not in filtered_paths]
+            report_path = os.path.join(report_dir, f"{report_prefix}_{split_name}.txt")
+            write_unreadable_image_report(
+                report_path,
+                split_name,
+                total_rows,
+                total_rows - filtered_frame.shape[0],
+                bad_files,
+            )
+    return filtered_frames
+
+
 # -----------------------------------------------------------------------------
 # 3) 공정성(fairness) 등 평가 목적으로 모델 추론 결과를 DataFrame으로 만드는 함수
 #    - test_frame: 평가할 이미지 목록과 라벨이 담긴 DataFrame

@@ -101,10 +101,19 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                  use_debiasing=True,  # 🔥 새로운 파라미터
                  lambda_grl=1.0,       # 🔥 GRL lambda
                  lambda_gender=0.1):   # 🔥 Gender loss weight
-    
-    (dataset, prune_type, loss_type, prune_rate, test_frame, face_dir,
-     total_classes, network, col_used, output_cols_each_task,
-     sensitive_group, exp_idx) = cfgs
+
+    if cfgs is None:
+        raise ValueError("train_model0에는 실험 설정 cfgs가 필요합니다.")
+
+    if len(cfgs) >= 13:
+        (dataset, prune_type, loss_type, prune_rate, test_frame, face_dir,
+         total_classes, network, col_used, output_cols_each_task,
+         sensitive_group, exp_idx, seed) = cfgs[:13]
+    else:
+        (dataset, prune_type, loss_type, prune_rate, test_frame, face_dir,
+         total_classes, network, col_used, output_cols_each_task,
+         sensitive_group, exp_idx) = cfgs
+        seed = None
 
     device = torch.device('cuda:0')
     prev_cudnn_enabled = torch.backends.cudnn.enabled
@@ -307,14 +316,10 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     
                     running_corrects = [running_corrects[j] + acc[j] for j in range(len(col_used_training))]
 
+                    # 통계 계산에는 동일 배치의 출력을 재사용하고 graph는 끊습니다.
+                    outputs_for_stats = outputs.detach()
+
                 # 🔥 EO 통계 누적 (기존 로직 유지)
-                # Test phase에서만 정확한 예측을 위해 outputs 재계산
-                if use_debiasing:
-                    task_outputs_for_stats, _ = safe_model_forward(image_batched)
-                    outputs_for_stats = task_outputs_for_stats
-                else:
-                    outputs_for_stats = torch.squeeze(safe_model_forward(image_batched))
-                
                 for task_idx, (st, ed) in enumerate(output_cols_each_task):
                     task_out = outputs_for_stats[:, st:ed]
                     task_label = task_labels[:, task_idx]
@@ -549,6 +554,8 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         os.makedirs(save_dir, exist_ok=True)
     
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    alpha = getattr(config, 'glo_imp_rate', None)
+    use_grl = getattr(config, 'glo_use_grl', use_debiasing)
     
     # 베스트 모델 요약 파일 생성
     best_model_filename = f"BEST_MODEL_SUMMARY_prune_{config.glo_prune_iter + 1}_{timestamp}.txt"
@@ -560,7 +567,11 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         f.write("="*80 + "\n\n")
         f.write(f"분석 시간: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Prune Iteration: {config.glo_prune_iter + 1}\n")
-        f.write(f"총 재학습 에폭 수: {num_epochs}\n\n")
+        f.write(f"총 재학습 에폭 수: {num_epochs}\n")
+        f.write(f"Seed: {seed}\n")
+        f.write(f"Alpha: {alpha}\n")
+        f.write(f"GRL Enabled: {use_grl}\n")
+        f.write("\n")
         f.write("-"*80 + "\n")
         f.write("📊 Best Model Performance\n")
         f.write("-"*80 + "\n")
@@ -582,7 +593,10 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     
     torch.save({
         'model_state_dict': best_model_wts,
-        'optimizer_state_dict': best_optimizer_state
+        'optimizer_state_dict': best_optimizer_state,
+        'grl_enabled': use_grl,
+        'alpha': alpha,
+        'seed': seed,
     }, best_weights_path)
     
     print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")

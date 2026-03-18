@@ -8,3 +8,4 @@ glo_fairness:dict = {} # 태스크별 TP, FN, FP, TN, TPR, FPR 정보
 glo_retrain_epoch = 0 # 에폭 재학습 횟수
 glo_is_checked = False # 체크포인트 여부
 glo_imp_rate = 0.0 # 중요도 비율
+glo_use_grl = True # GRL 기반 debiasing 사용 여부

@@ -26,6 +26,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 
+# impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
+# 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
+IMPT_TYPE1_ALPHA = 0.95
+
+
 forward_mapping_dict = {
     'Linear': custom_forward_linear,
     'Conv2d': custom_forward_conv2d,
@@ -489,7 +494,12 @@ class FairGRAPE(Prunner):
     def get_mask(self, prune_cfgs):
         prune_ratio, test_csv, new_img_dir, sensitive_classes, masked_grads, output_cols_each_task ,col_used, para_batch, impt_type, stop_batch, delta_p, network, sensitive_group = prune_cfgs
         print("-------------get_mask-------------")
-        print("sensitive_classes:",sensitive_classes)
+        print("prune_ratio:", prune_ratio)
+        print("sensitive_classes:", sensitive_classes)
+        print("impt_type:", impt_type)
+        print("sensitive_group:", sensitive_group)
+        print("stop_batch:", stop_batch)
+        print("alpha:", IMPT_TYPE1_ALPHA)
         mask = fairness_grad(self.model, prune_ratio, test_csv, new_img_dir, sensitive_classes, masked_grads, output_cols_each_task ,col_names=col_used, para_batch=para_batch, impt_type=impt_type, stop_batch=stop_batch, delta_p=delta_p, network=network, sensitive_group=sensitive_group)
         return mask
 
@@ -932,132 +942,131 @@ def analyze_and_save_scores(imp_scaled_dict, gen_scaled_dict, output_dir='score_
     return stats_file, imp_hist_path, gen_hist_path, combined_hist_path
 
 
-def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_classes = 2, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)],col_names=['race','gender'], para_batch=1, impt_type = 0, stop_batch=10000, delta_p=False,n_jobs=1, network=None, sensitive_group=None):
-    
+def compute_gender_gradient_gap_importance(model, test_csv, new_img_dir=None, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'], stop_batch=10000, sensitive_group=None):
+    print("-------------compute_gender_gradient_gap_importance-------------")
 
-    gender_model, info = load_gender_model_from_ckpt(model, 'gender_model/best_gender_model.pth', device)
-    print('missing:', info.missing_keys)
-    print('unexpected:', info.unexpected_keys)
-    print('gender head shape:', tuple(gender_model.classifier[1].weight.shape))
+    if sensitive_group not in (None, 'gender'):
+        raise NotImplementedError("impt_type == 1 은 현재 gender 기준 그룹 분리만 지원합니다.")
 
+    if col_names[-1] != 'gender':
+        raise ValueError(f"impt_type == 1 은 마지막 라벨 컬럼이 gender 여야 합니다. 현재: {col_names[-1]}")
 
+    if isinstance(test_csv, str):
+        test_frame = pd.read_csv(test_csv)
+    else:
+        test_frame = test_csv.copy()
 
-    
-    # 민감 집단에 대한 gradient 분포를 고려한 프루닝
-    if impt_type == 0:
-        importance_score, gender_score = compute_importance(model, gender_model, test_csv, new_img_dir=new_img_dir, masked_grads=masked_grads, output_cols_each_task=output_cols_each_task,col_names=col_names,stop_batch=stop_batch, network=network, sensitive_group=sensitive_group, sensitive_classes=sensitive_classes)
-    elif impt_type == 1:
-        _,grad_mag_by_race = importance_by_class1(model, test_csv, new_img_dir=new_img_dir, masked_grads=masked_grads, output_cols_each_task=output_cols_each_task,col_names=col_names, n_classes=sensitive_classes)    
-    elif impt_type == 2:
-        _,grad_mag_by_race = importance_by_class2(model, test_csv, new_img_dir, output_cols_each_task,col_names)
+    if new_img_dir:
+        faces = set(os.listdir(new_img_dir))
+        new_face_name = []
+        face_found_mask = []
+        for i in range(test_frame.shape[0]):
+            face_name_align = split_image_name(test_frame['face_name_align'][i])
+            face_found_mask.append(face_name_align in faces)
+            if face_name_align in faces:
+                new_face_name.append(os.path.join(new_img_dir, face_name_align))
+        test_frame = test_frame[face_found_mask].reset_index(drop=True)
+        test_frame['face_name_align'] = new_face_name
 
-    def show_stats(name, tensor, k=5):
-        flat = tensor.flatten()
-        topk_vals, topk_idx = torch.topk(flat.abs(), k)
+    batch_size = 384
+    test_loader, _ = make_datasets(test_frame, test_frame, True, batch_size, col_used=col_names)
+    criterion = nn.CrossEntropyLoss()
 
-        shape_str = str(list(tensor.shape))       # ← ★ 리스트를 문자열로 변환
-        # 폭 지정(:>12)도 이제 정상 작동
-        #print(f"[{name:<30}] shape={shape_str:>12} "
-        #    f"mean={flat.mean():.3e}  std={flat.std():.3e}  "
-        #    f"max={flat.max():.3e}")
+    print(f"gender gap 설정: batch_size={batch_size}, stop_batch={stop_batch}, total_batches={len(test_loader)}")
+    print(f"gender gap 라벨 컬럼: {col_names}")
 
-        #print(f"top{topk_vals.tolist()}  (indices {topk_idx.tolist()})")
+    grad_abs_sums = {0: {}, 1: {}}
+    group_sample_counts = {0: 0, 1: 0}
 
-    
-    #print("\n── Importance(테일러) 요약 ──")
-    #for n, t in importance_score.items():
-    #    show_stats(n, t, k=3)
+    model.eval()
 
-    #print("\n── Gender-Importance 요약 ──")
-    #for n, t in gender_score.items():
-    #    show_stats(n, t, k=3)
+    prev_cudnn_enabled = torch.backends.cudnn.enabled
+    prev_cudnn_benchmark = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.enabled = False
+    torch.backends.cudnn.benchmark = False
 
-    import config
-    from scipy.stats import rankdata
-    
-    beta = 1.0
+    try:
+        for batch_idx, sample_batched in enumerate(test_loader):
+            if batch_idx >= stop_batch:
+                break
 
-    hybrid_importance = {}
+            if batch_idx % 100 == 0:
+                print(f"{batch_idx}번째 mini-batch gender grad gap 계산 중! 현재 group counts={group_sample_counts}")
 
-     # 🔥 분석용 딕셔너리 추가
-    #imp_scaled_dict = {}
-    #gen_scaled_dict = {}
+            image_batched, label_batched = sample_batched
+            image_batched = image_batched.to(device, dtype=torch.float, non_blocking=True).contiguous()
+            label_batched = label_batched.to(device, non_blocking=True)
+            gender_labels = label_batched[:, -1].long()
 
-    common_names = set(importance_score.keys()) & set(gender_score.keys())
+            for group_value in [0, 1]:
+                group_mask = gender_labels == group_value
+                group_size = int(group_mask.sum().item())
+                if group_size == 0:
+                    continue
 
-    # 🔍 디버깅 출력
-    print("\n🔍 Importance Score 레이어 수:", len(importance_score))
-    print("🔍 Gender Score 레이어 수:", len(gender_score))
-    print("🔍 공통 레이어 수:", len(common_names))
+                if batch_idx < 3 or batch_idx % 100 == 0:
+                    print(f"  - batch {batch_idx}, gender={group_value}, samples={group_size}")
 
-    # ---------------------------------------------------------
-    # 2. 점수 계산 (Layer-wise)
-    # ---------------------------------------------------------
+                model.zero_grad(set_to_none=True)
+                with torch.backends.cudnn.flags(enabled=False):
+                    outputs = safe_forward_with_cudnn_fallback(model, image_batched)
+
+                group_outputs = outputs[group_mask]
+                group_targets = label_batched[group_mask]
+                group_loss = loss_multi_tasks(group_outputs, group_targets, criterion, output_cols_each_task)
+                group_loss.backward()
+
+                group_sample_counts[group_value] += group_size
+
+                for name, layer in model.named_modules():
+                    if type(layer).__name__ not in supported_layers:
+                        continue
+                    if not hasattr(layer, 'weight') or layer.weight.grad is None:
+                        continue
+
+                    grad_abs = layer.weight.grad.detach().abs().clone()
+                    if masked_grads and hasattr(layer, 'mask'):
+                        mask = layer.mask.detach().clone()
+                        if mask.device != grad_abs.device:
+                            mask = mask.to(grad_abs.device)
+                        grad_abs = grad_abs * mask
+
+                    weighted_grad_abs = grad_abs * group_size
+                    if name not in grad_abs_sums[group_value]:
+                        grad_abs_sums[group_value][name] = weighted_grad_abs
+                    else:
+                        grad_abs_sums[group_value][name] += weighted_grad_abs
+    finally:
+        torch.backends.cudnn.enabled = prev_cudnn_enabled
+        torch.backends.cudnn.benchmark = prev_cudnn_benchmark
+
+    if group_sample_counts[0] == 0 or group_sample_counts[1] == 0:
+        raise RuntimeError(f"gender group 샘플이 부족합니다. group counts: {group_sample_counts}")
+
+    fairness_score = {}
+    common_names = set(grad_abs_sums[0].keys()) & set(grad_abs_sums[1].keys())
+    print(f"gender grad gap 계산 완료: group counts={group_sample_counts}, common layers={len(common_names)}")
+
     for name in common_names:
-        if is_classifier_head(name): 
+        if is_classifier_head(name):
             continue
+        avg_group0 = grad_abs_sums[0][name] / group_sample_counts[0]
+        avg_group1 = grad_abs_sums[1][name] / group_sample_counts[1]
+        fairness_score[name] = torch.abs(avg_group0 - avg_group1)
 
-        imp = importance_score[name] # Performance Score
-        gen = gender_score[name]     # Fairness Score (Bias)
+    print("gender grad gap 레이어별 요약:")
+    for name in sorted(fairness_score.keys()):
+        score = fairness_score[name]
+        print(
+            f"  ✓ {name}: shape={tuple(score.shape)}, "
+            f"mean={score.mean().item():.6e}, max={score.max().item():.6e}, min={score.min().item():.6e}"
+        )
 
-        if imp.shape != gen.shape:
-            print(f"⚠️ Shape mismatch: {name} - imp:{imp.shape} vs gen:{gen.shape}")
-            continue
-
-        # [중요] Min-Max Scaling 제거! 
-        # 대신, 절대적인 크기를 비교하기 위해 값의 범위를 '비율'로 맞춥니다.
-        # 단순히 max 값으로 나누어 0~1 스케일(상대 크기 보존)만 맞춥니다.
-        # 이렇게 하면 분포(Distribution)가 찌그러지지 않습니다.
-        
-        # 1) Performance Score 정규화 (최대값 기준)
-        # 0으로 나누는 것 방지 (+ 1e-12)
-        imp_scaled = imp / (imp.max() + 1e-12) 
-        
-        # 2) Fairness Score 정규화 (최대값 기준)
-        # gen 값이 클수록 '편향된' 것이라고 가정합니다.
-        gen_scaled = gen / (gen.max() + 1e-12)
-
-        # NaN / Inf 방지 (안전장치)
-        imp_scaled = torch.nan_to_num(imp_scaled, nan=0.0)
-        gen_scaled = torch.nan_to_num(gen_scaled, nan=0.0)
-
-        # 🔥 분석용 저장
-        #imp_scaled_dict[name] = imp_scaled.clone()
-        #gen_scaled_dict[name] = gen_scaled.clone()
-
-        # -----------------------------------------------------
-        # 🔥 핵심 변경: 벌점(Penalty) 수식 적용
-        # Score = imp_score / (1 + beta * gender_score)
-        # 원리: 성능이 아무리 좋아도(분자 ↑), 편향이 심하면(분모 ↑) 점수가 확 깎임.
-        # -----------------------------------------------------
-        denominator = 1.0 + (beta * gen_scaled)
-        hybrid_score = imp_scaled / denominator
-        
-        hybrid_importance[name] = hybrid_score
-
-    # ---------------------------------------------------------
-    # 3. 통계 확인 (디버깅용)
-    # ---------------------------------------------------------
-    # 🔥 통계 분석 및 히스토그램 생성
-    #print("\n" + "="*80)
-    #print("📊 Score 분석 시작...")
-    #print("="*80)
-    
-    # analyze_and_save_scores(imp_scaled_dict, gen_scaled_dict, 
-    #                       output_dir='score_analysis')
-    
-    #print("="*80)
-    #print("📊 Score 분석 완료!")
-    #print("="*80 + "\n")
+    return fairness_score
 
 
-    # ---------------------------------------------------------
-    # 4. 마스크 생성 (Top-K 방식 유지)
-    # ---------------------------------------------------------
-    keep_ratio = 1.0 - prune_ratio
-    mask_by_layernames = {}
-
-    def safe_topk_mask(score_tensor, keep_ratio):
+def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_classes = 2, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)],col_names=['race','gender'], para_batch=1, impt_type = 0, stop_batch=10000, delta_p=False,n_jobs=1, network=None, sensitive_group=None):
+    def safe_topk_mask(score_tensor, keep_ratio, largest=True):
         flat = score_tensor.flatten().cpu() # Top-k는 CPU에서 계산 추천 (메모리 절약)
         N = flat.numel()
         k = int(N * keep_ratio)
@@ -1065,39 +1074,186 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         if k <= 0: return torch.zeros_like(flat, dtype=torch.long)
         if k >= N: return torch.ones_like(flat, dtype=torch.long)
 
-        # 상위 k개 선택
-        _, topk_indices = torch.topk(flat, k, largest=True, sorted=False)
+        _, topk_indices = torch.topk(flat, k, largest=largest, sorted=False)
         
         mask = torch.zeros_like(flat, dtype=torch.long)
         mask[topk_indices] = 1
         return mask.view_as(score_tensor).to(score_tensor.device) # 다시 GPU로
 
-    for name, layer in model.named_modules():
-        # ... (기존 코드와 동일하게 레이어 필터링) ...
-        # 여기서는 예시로 supported_layers 체크 생략 (작성하신 코드엔 포함되어야 함)
-        if type(layer).__name__ not in supported_layers:
-            continue
+    def print_score_summary(score_by_layer, tag):
+        print(f"{tag} 점수 요약: 총 {len(score_by_layer)}개 레이어")
+        for name in sorted(score_by_layer.keys()):
+            score = score_by_layer[name]
+            print(
+                f"  ✓ {name}: shape={tuple(score.shape)}, "
+                f"mean={score.mean().item():.6e}, std={score.std().item():.6e}, "
+                f"min={score.min().item():.6e}, max={score.max().item():.6e}"
+            )
 
-        if hasattr(layer, 'weight'): # 가중치 있는 레이어만
-            
+    def scale_score_tensor(score_tensor):
+        scaled = score_tensor / (score_tensor.max() + 1e-12)
+        return torch.nan_to_num(scaled, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def combine_weighted_scores(importance_by_layer, fairness_by_layer, alpha):
+        combined_score = {}
+        common_names = set(importance_by_layer.keys()) & set(fairness_by_layer.keys())
+
+        print("\n🔍 Importance Score 레이어 수:", len(importance_by_layer))
+        print("🔍 Fairness Score 레이어 수:", len(fairness_by_layer))
+        print("🔍 공통 레이어 수:", len(common_names))
+
+        for name in common_names:
             if is_classifier_head(name):
-                # 분류기는 무조건 보존
+                continue
+
+            imp = importance_by_layer[name]
+            fair = fairness_by_layer[name]
+
+            if imp.shape != fair.shape:
+                print(f"⚠️ Shape mismatch: {name} - imp:{imp.shape} vs fair:{fair.shape}")
+                continue
+
+            imp_scaled = scale_score_tensor(imp)
+            fair_scaled = scale_score_tensor(fair)
+            combined_score[name] = (alpha * imp_scaled) - ((1.0 - alpha) * fair_scaled)
+
+        return combined_score
+
+    def build_mask_list(score_by_layer, keep_ratio, keep_largest_scores=True):
+        mask_by_layernames = {}
+
+        for name, layer in model.named_modules():
+            if type(layer).__name__ not in supported_layers:
+                continue
+
+            if not hasattr(layer, 'weight'):
+                continue
+
+            if is_classifier_head(name):
                 mask = torch.ones_like(layer.weight, dtype=torch.long)
-            elif name in hybrid_importance:
-                # 계산된 점수로 마스킹
-                score_tensor = hybrid_importance[name]
-                mask = safe_topk_mask(score_tensor, keep_ratio)
+            elif name in score_by_layer:
+                mask = safe_topk_mask(score_by_layer[name], keep_ratio, largest=keep_largest_scores)
+                kept = int(mask.sum().item())
+                total = mask.numel()
+                print(f"  mask[{name}]: keep={kept}/{total} ({kept / max(total, 1):.4f}), keep_largest_scores={keep_largest_scores}")
             else:
-                # 점수가 없으면(예: Conv가 아닌 레이어 등) 보존 or 삭제 정책 결정
                 mask = torch.ones_like(layer.weight, dtype=torch.long)
-            
+                print(f"  mask[{name}]: 점수 없음, 전체 유지")
+
             mask_by_layernames[name] = mask
 
-    # 리스트로 변환 (GPU 이동)
-    mask_list = [mask.to(device) for name, mask in mask_by_layernames.items()]
-    
-    print(f"마스크 추출 완료: 총 {len(mask_list)}개 레이어 적용됨.")
-    return mask_list
+        mask_list = [mask.to(device) for name, mask in mask_by_layernames.items()]
+        print(f"마스크 추출 완료: 총 {len(mask_list)}개 레이어 적용됨.")
+        return mask_list
+
+    keep_ratio = 1.0 - prune_ratio
+    print("-------------fairness_grad-------------")
+    print(f"prune_ratio={prune_ratio}, keep_ratio={keep_ratio}, impt_type={impt_type}, sensitive_group={sensitive_group}")
+
+    # 민감 집단에 대한 gradient 분포를 고려한 프루닝
+    if impt_type == 0:
+        print("imp 0")
+
+        gender_model, info = load_gender_model_from_ckpt(model, 'gender_model/best_gender_model.pth', device)
+        print('missing:', info.missing_keys)
+        print('unexpected:', info.unexpected_keys)
+        print('gender head shape:', tuple(gender_model.classifier[1].weight.shape))
+
+        importance_score, gender_score = compute_importance(
+            model,
+            gender_model,
+            test_csv,
+            new_img_dir=new_img_dir,
+            masked_grads=masked_grads,
+            output_cols_each_task=output_cols_each_task,
+            col_names=col_names,
+            stop_batch=stop_batch,
+            network=network,
+            sensitive_group=sensitive_group,
+            sensitive_classes=sensitive_classes,
+        )
+
+        beta = 1.0
+        hybrid_importance = {}
+        common_names = set(importance_score.keys()) & set(gender_score.keys())
+
+        print("\n🔍 Importance Score 레이어 수:", len(importance_score))
+        print("🔍 Gender Score 레이어 수:", len(gender_score))
+        print("🔍 공통 레이어 수:", len(common_names))
+
+        for name in common_names:
+            if is_classifier_head(name):
+                continue
+
+            imp = importance_score[name]
+            gen = gender_score[name]
+
+            if imp.shape != gen.shape:
+                print(f"⚠️ Shape mismatch: {name} - imp:{imp.shape} vs gen:{gen.shape}")
+                continue
+
+            imp_scaled = imp / (imp.max() + 1e-12)
+            gen_scaled = gen / (gen.max() + 1e-12)
+
+            imp_scaled = torch.nan_to_num(imp_scaled, nan=0.0)
+            gen_scaled = torch.nan_to_num(gen_scaled, nan=0.0)
+
+            denominator = 1.0 + (beta * gen_scaled)
+            hybrid_score = imp_scaled / denominator
+            hybrid_importance[name] = hybrid_score
+
+        print_score_summary(hybrid_importance, "hybrid importance")
+        return build_mask_list(hybrid_importance, keep_ratio)
+
+    if impt_type == 1:
+        if sensitive_classes != 2:
+            raise NotImplementedError("impt_type == 1 은 현재 2개 gender 그룹만 지원합니다.")
+
+        alpha = float(IMPT_TYPE1_ALPHA)
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"impt_type == 1 의 alpha는 0과 1 사이여야 합니다. 현재 값: {alpha}")
+
+        import config
+        config.glo_imp_rate = alpha
+
+        print(f"impt_type == 1: alpha={alpha:.4f}로 성능/공정성 혼합 pruning 시작")
+
+        importance_score, _ = compute_importance(
+            model,
+            None,
+            test_csv,
+            new_img_dir=new_img_dir,
+            masked_grads=masked_grads,
+            output_cols_each_task=output_cols_each_task,
+            col_names=col_names,
+            stop_batch=stop_batch,
+            network=network,
+            sensitive_group=sensitive_group,
+            sensitive_classes=sensitive_classes,
+        )
+
+        fairness_score = compute_gender_gradient_gap_importance(
+            model,
+            test_csv,
+            new_img_dir=new_img_dir,
+            masked_grads=masked_grads,
+            output_cols_each_task=output_cols_each_task,
+            col_names=col_names,
+            stop_batch=stop_batch,
+            sensitive_group=sensitive_group,
+        )
+
+        print_score_summary(importance_score, "task importance")
+        print_score_summary(fairness_score, "gender gradient gap fairness")
+
+        combined_score = combine_weighted_scores(importance_score, fairness_score, alpha)
+        print_score_summary(combined_score, "alpha-weighted combined")
+        return build_mask_list(combined_score, keep_ratio, keep_largest_scores=True)
+
+    if impt_type == 2:
+        raise NotImplementedError("impt_type == 2 는 아직 구현되지 않았습니다.")
+
+    raise ValueError(f"지원하지 않는 impt_type 입니다: {impt_type}")
 
 
 
@@ -1130,7 +1286,8 @@ def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_g
 
     #! 1) 모델 준비
     model.eval()        # [CHANGED] train() -> eval() (BN 안정화)
-    gender_model.eval() # [CHANGED] train() -> eval()
+    if gender_model is not None:
+        gender_model.eval() # [CHANGED] train() -> eval()
 
     #! 2) 데이터 준비
     if isinstance(test_csv, str):
@@ -1218,52 +1375,53 @@ def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_g
 
         #! 6) Gender importance
         batches_gender = 0
-        for batch_idx, sample_batched in enumerate(test_loader):
-            if batch_idx >= stop_batch:
-                break
-            batches_gender += 1
-            if batch_idx % log_every == 0:  # [CHANGED]
-                print(f"{batch_idx}번째 mini-batch gender_imp 중요도 계산 중!")
+        if gender_model is not None:
+            for batch_idx, sample_batched in enumerate(test_loader):
+                if batch_idx >= stop_batch:
+                    break
+                batches_gender += 1
+                if batch_idx % log_every == 0:  # [CHANGED]
+                    print(f"{batch_idx}번째 mini-batch gender_imp 중요도 계산 중!")
 
-            image_batched, label_batched = sample_batched
-            image_batched = image_batched.to(device, dtype=torch.float, non_blocking=True).contiguous()  # [CHANGED]
-            gender_labels = label_batched[:, -1].long().to(device, non_blocking=True)
+                image_batched, label_batched = sample_batched
+                image_batched = image_batched.to(device, dtype=torch.float, non_blocking=True).contiguous()  # [CHANGED]
+                gender_labels = label_batched[:, -1].long().to(device, non_blocking=True)
 
-            gender_model.zero_grad(set_to_none=True)  # [CHANGED]
-            with torch.backends.cudnn.flags(enabled=False):  # [CHANGED]
-                outputs = safe_forward_with_cudnn_fallback(gender_model, image_batched)
+                gender_model.zero_grad(set_to_none=True)  # [CHANGED]
+                with torch.backends.cudnn.flags(enabled=False):  # [CHANGED]
+                    outputs = safe_forward_with_cudnn_fallback(gender_model, image_batched)
 
-            gender_loss = criterion(outputs, gender_labels)
-            gender_loss.backward()
+                gender_loss = criterion(outputs, gender_labels)
+                gender_loss.backward()
 
-            for name, layer in gender_model.named_modules():
-                if type(layer).__name__ not in supported_layers:
-                    continue
-                if not hasattr(layer, 'weight') or layer.weight.grad is None:
-                    continue
+                for name, layer in gender_model.named_modules():
+                    if type(layer).__name__ not in supported_layers:
+                        continue
+                    if not hasattr(layer, 'weight') or layer.weight.grad is None:
+                        continue
 
-                grads = layer.weight.grad.detach().clone()
-                weights = layer.weight.detach().clone()
+                    grads = layer.weight.grad.detach().clone()
+                    weights = layer.weight.detach().clone()
 
-                mask = None if is_classifier_head(name) else model_masks.get(name, None)
-                if masked_grads and mask is not None and mask.shape == grads.shape:
-                    if mask.device != grads.device:  # [CHANGED] 디바이스 정렬
-                        mask = mask.to(grads.device)
-                    grads = grads * mask
+                    mask = None if is_classifier_head(name) else model_masks.get(name, None)
+                    if masked_grads and mask is not None and mask.shape == grads.shape:
+                        if mask.device != grads.device:  # [CHANGED] 디바이스 정렬
+                            mask = mask.to(grads.device)
+                        grads = grads * mask
 
-                hess = (weights * grads).pow(2)
+                    hess = (weights * grads).pow(2)
 
-                if masked_grads and mask is not None and mask.shape == hess.shape:
-                    if mask.device != hess.device:
-                        mask = mask.to(hess.device)
-                    hess = hess * mask
+                    if masked_grads and mask is not None and mask.shape == hess.shape:
+                        if mask.device != hess.device:
+                            mask = mask.to(hess.device)
+                        hess = hess * mask
 
-                if name not in gender_grad_accum:
-                    gender_grad_accum[name] = grads
-                    gender_score[name] = hess
-                else:
-                    gender_grad_accum[name] += grads
-                    gender_score[name] += hess
+                    if name not in gender_grad_accum:
+                        gender_grad_accum[name] = grads
+                        gender_score[name] = hess
+                    else:
+                        gender_grad_accum[name] += grads
+                        gender_score[name] += hess
 
     finally:
         # [CHANGED] cuDNN 상태 복구
@@ -1399,77 +1557,7 @@ def importance_by_class0(model_path, test_csv, new_img_dir=None, masked_grads=Tr
     return grad_each_group, H_each_group
 """
     
-def importance_by_class1(model_path, test_csv, new_img_dir=None, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'],network=None,sample_per_class=32,optimizer=None, lr=1e-4, n_classes=2):
-    # 그룹별 gradient 정보 계산 (두 번째 버전)
-    supported_layers = ['Linear', 'Conv2d', 'Conv1d']
-    model = model_path 
-    
-    test_frame = pd.read_csv(test_csv) if isinstance(test_csv, str) else test_csv
-    criterion = nn.CrossEntropyLoss()
-    criterion_sensitive = nn.BCELoss()
-    activation = nn.Sigmoid()
 
-    if new_img_dir:
-        initial_rows = test_frame.shape[0]
-        faces = set(os.listdir(new_img_dir))
-        faces_found = 0
-        new_face_name = []
-        face_found_mask = []
-        for i in range(test_frame.shape[0]):
-            face_name_align = split_image_name(test_frame['face_name_align'][i])
-            face_found_mask.append(face_name_align in faces)
-            if face_name_align in faces:
-                faces_found += 1
-                new_face_name.append(os.path.join(new_img_dir, face_name_align))
-        test_frame = test_frame[face_found_mask].reset_index(drop=True)
-        test_frame['face_name_align'] = new_face_name
-    test_loader,_ =  make_datasets(test_frame,test_frame,True,64,col_used=col_names)
-
-    model.train()
-    test_loader = iter(test_loader)
-    sensitive_cols_in_target = len(output_cols_each_task)
-    images, targets, comb_idx = fetch_a_fair_batch(test_loader, n_classes, sample_per_class, sensitive_cols_in_target)
-    targets = targets.to(device)
-    sensitive_groups = sorted([[int(i) for i in comb.split('_')] for comb in comb_idx])
-    sensitive_group_idx_in_output = [i for i in range(len(sensitive_groups))]
-
-    outputs = torch.squeeze(safe_forward_with_cudnn_fallback(model, images.to(device)))
-
-    grad_each_group = {}
-    H_each_group = {}
-    mask_at_each_layer = {}
-    for group_idx, group in enumerate(sensitive_groups):
-       gradients = {}
-       hessians = {}
-       obs_this_group = torch.squeeze((targets[:, sensitive_cols_in_target] == group[0]).nonzero())
-       output_cols_for_non_protected = output_cols_each_task[:(len(output_cols_each_task))]
-       outputs_this_group = outputs[obs_this_group,:]
-       targets_this_group = targets[obs_this_group,:]
-       loss_non_protected = loss_multi_tasks(outputs_this_group,targets_this_group,criterion,output_cols_for_non_protected)
-       cur_sensitive_group_output = outputs[obs_this_group, sensitive_group_idx_in_output[group_idx]].to(device)
-       sensitive_target_this_group = torch.squeeze(targets[obs_this_group, sensitive_cols_in_target] == group[0]).clone().float().to(device)
-       loss = loss_non_protected + criterion_sensitive(activation(cur_sensitive_group_output).view(-1), sensitive_target_this_group).cuda()
-       loss = loss_non_protected
-
-       try:
-           loss.backward(retain_graph=True)
-       except:
-           print(loss)
-
-       for name, layer in model.named_modules():
-            if type(layer).__name__ in supported_layers:
-                grads = layer.weight.grad.clone().detach().cpu()
-                weights = layer.weight.data.clone().detach().cpu()
-                if masked_grads:
-                    masks = layer.mask.clone().detach().cpu()
-                    mask_at_each_layer[name] = [torch.sum(masks), grads.shape]
-                    grads *= masks
-                hessians[name] = (weights.abs() * grads.abs())**2
-                gradients[name] = grads
-       grad_each_group[group_idx] = copy.deepcopy(gradients)
-       H_each_group[group_idx] = copy.deepcopy(hessians)
-                     
-    return grad_each_group, H_each_group
 
 def make_mask_by_grad(grad_each_group, n_classes=7):
     # 각 그룹별 gradient 정보를 레이어별로 합치는 함수
@@ -1506,77 +1594,6 @@ def fetch_a_fair_batch(dataloader, num_classes, samples_per_class, target_col):
     X, y = torch.cat([torch.cat(_, 0) for _ in datas]), torch.cat([torch.cat(_) for _ in labels])
     return X, y, combination_idx
 
-def importance_by_class2(model_path, test_csv, new_img_dir=None, output_cols = [(0,7)], col_names=['race'],masked_grads=True,sample_per_class=10,lr=1e-5):
-    # 세 번째 버전의 그룹별 gradient 계산
-    supported_layers = ['Linear', 'Conv2d', 'Conv1d']
-
-    model = model_path 
-
-    model.train()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    
-    test_frame = pd.read_csv(test_csv) if isinstance(test_csv, str) else test_csv
-    criterion = nn.BCELoss()
-    criterion_sensitive = nn.BCELoss()
-    activation = nn.Sigmoid()
-
-    if new_img_dir:
-        initial_rows = test_frame.shape[0]
-        faces = set(os.listdir(new_img_dir))
-        faces_found = 0
-        new_face_name = []
-        face_found_mask = []
-        for i in range(test_frame.shape[0]):
-            face_name_align = split_image_name(test_frame['face_name_align'][i])
-            face_found_mask.append(face_name_align in faces)
-            if face_name_align in faces:
-                faces_found += 1
-                new_face_name.append(os.path.join(new_img_dir, face_name_align))
-        test_frame = test_frame[face_found_mask].reset_index(drop=True)
-        test_frame['face_name_align'] = new_face_name
-
-    test_loader,_ =  make_datasets(test_frame,test_frame,True,64,col_used=col_names)
-
-    model.train()
-    test_loader = iter(test_loader)
-    target_col = 0
-    num_classes = output_cols[0][1] - output_cols[0][0]
-    images, targets, comb_idx = fetch_a_fair_batch(test_loader, num_classes, sample_per_class,target_col)
-
-    outputs = torch.squeeze(safe_forward_with_cudnn_fallback(model, images.to(device)))
-
-    group_outputs = outputs
-    group_targets = torch.squeeze(targets[:, target_col]).to(device)
-
-    groups = sorted([[int(i) for i in comb.split('_')] for comb in comb_idx])
-    grad_each_group = {}
-    H_each_group = {}
-    mask_at_each_layer = {}
-
-    for group_idx, group in enumerate(groups):
-       gradients = {}
-       hessians = {}
-       output_this_group = group_outputs[:, group]
-       target_this_group = (group_targets == group[0]).clone().detach().float()
-       loss = criterion(activation(output_this_group).view(-1), target_this_group)
-       try:
-           loss.backward(retain_graph=True)
-       except:
-           print(loss)
-       for name, layer in model.named_modules():
-            if type(layer).__name__ in supported_layers:
-                grads = layer.weight.grad.clone().detach().cpu()
-                weights = layer.weight.data.clone().detach().cpu()
-                if masked_grads:
-                    masks = layer.mask.clone().detach().cpu()
-                    mask_at_each_layer[name] = [torch.sum(masks), grads.shape]
-                    grads *= masks
-                hessians[name] = weights.abs() * grads.abs()
-                gradients[name] = grads
-       grad_each_group[group_idx] = copy.deepcopy(gradients)
-       H_each_group[group_idx] = copy.deepcopy(hessians)
-
-    return grad_each_group, H_each_group
 
 def save_impt_df(cfgs):
     # 중요도 정보를 CSV로 저장하는 함수

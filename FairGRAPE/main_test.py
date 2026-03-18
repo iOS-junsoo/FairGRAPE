@@ -11,7 +11,7 @@ import numpy as np
 
 from dataset import make_frame, make_datasets, prepare_ImageNet
 from prune import WS, SNIP, GraSP, Lottery, FairGRAPE, Importance, Random, save_impt_df
-from util import make_model, save_model, save_output, download_dataset, show_acc_df, setseed, save_unpruned_model, print_acc_scores, safe_forward_with_cudnn_fallback
+from util import make_model, save_model, save_output, download_dataset, show_acc_df, setseed, save_unpruned_model, print_acc_scores, safe_forward_with_cudnn_fallback, filter_readable_images_in_frames
 from train_and_val import train, loss_multi_tasks
 
 # 가지치기(Pruning) 기법을 선택하기 위한 매핑
@@ -40,9 +40,13 @@ def experiment(args):
     save_impt = args.save_impt
     para_batch = args.para_batch
     stop_batch = args.stop_batch
+    use_grl = not args.no_grl
 
     seed = args.seed
     setseed(seed)
+
+    import config
+    config.glo_use_grl = use_grl
 
     # 결과 저장용 디렉토리 생성
     save_dir = "trained_model/{}".format(prune_type)
@@ -125,6 +129,21 @@ def experiment(args):
     else:
         raise NotImplementedError("{} is not implemented!".format(dataset))
 
+    if dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA']:
+        unreadable_report_dir = os.path.join('data_quality_logs', dataset)
+        frames = filter_readable_images_in_frames(
+            frames,
+            loader='dlib',
+            report_dir=unreadable_report_dir,
+        )
+        if drop_race and dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace']:
+            frames_minority = filter_readable_images_in_frames(
+                frames_minority,
+                loader='dlib',
+                report_dir=unreadable_report_dir,
+                report_prefix='excluded_images_minority',
+            )
+
     lr_schedule = [1e-4, 1e-5, 1e-6]
     # 여기서 make_datasets 호출 시 shuffle=True로 되어 있음
     train_loader, test_loader = make_datasets(frames['train'], frames['val'], True, batch_size, col_used)
@@ -201,7 +220,17 @@ def experiment(args):
     
     if init_train and prune_type in ['WS', 'Full', 'FairGRAPE', 'Lottery', 'Importance'] or print_acc:
         print("Pruning 전 모델을 학습합니다!" if prune_type != 'Full' else "Pruning 없음, 전체 모델 학습!")
-        best_model, best_optimizer = train(best_model, criterion, dataloaders, lr_schedule, epoches, col_used_training, output_cols_each_task)
+        best_model, best_optimizer = train(
+            best_model,
+            criterion,
+            dataloaders,
+            lr_schedule,
+            epoches,
+            col_used_training,
+            output_cols_each_task,
+            cfgs=[dataset, prune_type, loss_type, prune_rate, frames['test'], face_dir, total_classes, network, col_used, output_cols_each_task, sensitive_group, exp_idx, seed],
+            use_debiasing=use_grl,
+        )
         
         
 
@@ -469,7 +498,7 @@ def experiment(args):
                            if 'classifier' in name}
 
         if retrain_iters > 0:
-            best_model, _ = train(best_model, criterion, dataloaders, [retrain_lr], [retrain_iters], col_used_training, output_cols_each_task, cfgs=[dataset, prune_type, loss_type, prune_rate, frames['test'], face_dir, total_classes, network, col_used, output_cols_each_task, sensitive_group, exp_idx])
+            best_model, _ = train(best_model, criterion, dataloaders, [retrain_lr], [retrain_iters], col_used_training, output_cols_each_task, cfgs=[dataset, prune_type, loss_type, prune_rate, frames['test'], face_dir, total_classes, network, col_used, output_cols_each_task, sensitive_group, exp_idx, seed], use_debiasing=use_grl)
             #df = save_output(best_model, [dataset, prune_type, loss_type, prune_rate, frames['test'], face_dir, total_classes, network, col_used, output_cols_each_task, sensitive_group, exp_idx], csv_savedir, False) # EO 측정용
             #acc, group_acc = acc_scores(df, col_used, sensitive_group)
             #print("retrain_iters 진행중")
@@ -527,7 +556,7 @@ def experiment(args):
     if prune_iters > 0 and retrain:
         print("가지치기 후 재학습을 진행합니다.")
         #best_model, _ = train(best_model, criterion, dataloaders, lr_schedule, epoches, col_used_training, output_cols_each_task)
-        best_model, _ = train(best_model, criterion, dataloaders, lr_schedule, epoches, col_used_training, output_cols_each_task, cfgs=[dataset, prune_type, loss_type, prune_rate, frames['test'], face_dir, total_classes, network, col_used, output_cols_each_task, sensitive_group, exp_idx])
+        best_model, _ = train(best_model, criterion, dataloaders, lr_schedule, epoches, col_used_training, output_cols_each_task, cfgs=[dataset, prune_type, loss_type, prune_rate, frames['test'], face_dir, total_classes, network, col_used, output_cols_each_task, sensitive_group, exp_idx, seed], use_debiasing=use_grl)
 
     
     
@@ -595,7 +624,8 @@ if __name__ == "__main__":
     parser.add_argument('--no_retrain', action='store_true', help='가지치기 후 재학습 과정을 생략할지 여부')
     parser.add_argument('--save_mask', action='store_true', help='가지치기 마스크를 .npy 파일 형태로 저장할지 여부')
     parser.add_argument('--print_acc', action='store_true', help='가지치기 및 파인튜닝 후 테스트 정확도를 표시할지 여부')
-    parser.add_argument('--delta_p', type=int, default=0, help='FairGRAPE 방식에서 중요도 계산 시 고려할 요소 (0: i, 1: p, 2: i*p)')
+    parser.add_argument('--delta_p', type=float, default=0.5, help='FairGRAPE 추가 파라미터')
+    parser.add_argument('--no_grl', action='store_true', help='재학습에서 GRL 기반 adversarial debiasing을 비활성화')
     parser.add_argument('--seed', type=int, default=42, help='랜덤 시드 설정 (재현성 확보를 위함)')
     parser.add_argument('--save_model_iter', nargs='+', type=int, default=-1, help='특정 가지치기 iteration(또는 epoch)에 모델을 저장할지 여부')
 
