@@ -28,7 +28,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
-IMPT_TYPE1_ALPHA = 0.95
+IMPT_TYPE1_ALPHA = 0.5
 
 
 forward_mapping_dict = {
@@ -1258,14 +1258,13 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 
 
 
-def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'],network=None,optimizer=None, lr=1e-4, stop_batch=10000, sensitive_group=None, sensitive_classes=None):
+def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'],network=None,optimizer=None, lr=1e-4, stop_batch=10000, sensitive_group=None, sensitive_classes=None, imp_batch_size=384):
     
     print("-------------compute_importance-------------")
     torch.autograd.set_detect_anomaly(False)  # [CHANGED] True -> False (안정성/속도)
 
     # [CHANGED] 로그/배치 고정값
     log_every = 100
-    imp_batch_size = 384
     print(f"log_every={log_every}")
     print(f"compute_importance batch_size={imp_batch_size}")
 

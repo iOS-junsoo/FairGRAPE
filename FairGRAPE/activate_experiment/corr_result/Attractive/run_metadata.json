@@ -1,0 +1,20 @@
+{
+  "checkpoint": "/workspace/FairGRAPE/FairGRAPE/trained_model/unpruned/CelebA_unpruned_classes_bygender_mobilenetv2_0.pt",
+  "activation_results": "/workspace/FairGRAPE/FairGRAPE/activate_experiment/results/celeba_unpruned_activation_gap/Attractive/layer_raw_scores.npz",
+  "split": "val",
+  "target_attr": "Attractive",
+  "target_attr_index": 2,
+  "target_layer": "features.17.conv.2",
+  "device": "cuda",
+  "batch_size": 64,
+  "importance_stop_batch": 10000,
+  "importance_batch_size": 128,
+  "max_eo_batches": null,
+  "max_zeroed_channels": null,
+  "max_plot_points": 5000,
+  "num_layers_activation": 53,
+  "num_layers_importance": 53,
+  "experiment2_baseline_eo": 0.22731779732677534,
+  "experiment2_num_channels": 320,
+  "experiment2_delta_metric": "delta_eo_abs"
+}
