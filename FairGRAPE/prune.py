@@ -28,7 +28,9 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
-IMPT_TYPE1_ALPHA = 0.5
+IMPT_TYPE1_ALPHA = 0.0
+IMPT_TYPE2_ALPHA = 0.9
+IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 
 
 forward_mapping_dict = {
@@ -499,7 +501,12 @@ class FairGRAPE(Prunner):
         print("impt_type:", impt_type)
         print("sensitive_group:", sensitive_group)
         print("stop_batch:", stop_batch)
-        print("alpha:", IMPT_TYPE1_ALPHA)
+        
+        if impt_type == 2:
+            print("alpha:", IMPT_TYPE2_ALPHA)
+        else:
+            print("alpha:", IMPT_TYPE1_ALPHA)
+
         mask = fairness_grad(self.model, prune_ratio, test_csv, new_img_dir, sensitive_classes, masked_grads, output_cols_each_task ,col_names=col_used, para_batch=para_batch, impt_type=impt_type, stop_batch=stop_batch, delta_p=delta_p, network=network, sensitive_group=sensitive_group)
         return mask
 
@@ -1065,6 +1072,377 @@ def compute_gender_gradient_gap_importance(model, test_csv, new_img_dir=None, ma
     return fairness_score
 
 
+def _is_impt_type2_target_layer(name: str) -> bool:
+    if name == 'features.1.conv.1':
+        return True
+    if name.startswith('features.') and name.endswith('.conv.1.0'):
+        return not name.startswith('features.18.')
+    return False
+
+
+def _get_impt_type2_target_layers(model):
+    target_layers = {}
+    for name, layer in model.named_modules():
+        if isinstance(layer, nn.Conv2d) and _is_impt_type2_target_layer(name):
+            target_layers[name] = layer
+    return target_layers
+
+
+def _get_impt_type2_block_layer_names(block_name: str):
+    if block_name == 'features.1':
+        return f'{block_name}.conv.0.0', f'{block_name}.conv.1', None
+    return f'{block_name}.conv.0.0', f'{block_name}.conv.1.0', f'{block_name}.conv.2'
+
+
+def _pool_channel_values(tensor: torch.Tensor, use_abs: bool = False) -> torch.Tensor:
+    pooled = tensor.abs() if use_abs else tensor
+    if pooled.ndim == 4:
+        return pooled.mean(dim=(2, 3))
+    if pooled.ndim == 3:
+        return pooled.mean(dim=2)
+    if pooled.ndim == 2:
+        return pooled
+    if pooled.ndim == 1:
+        return pooled.unsqueeze(0)
+    return pooled.reshape(pooled.shape[0], pooled.shape[1], -1).mean(dim=2)
+
+
+def _compute_binary_group_gap(channel_values: torch.Tensor, target_y: torch.Tensor, sensitive_a: torch.Tensor, y_value: int):
+    group0_mask = (target_y == y_value) & (sensitive_a == 0)
+    group1_mask = (target_y == y_value) & (sensitive_a == 1)
+    if not group0_mask.any() or not group1_mask.any():
+        return None
+
+    group0_mean = channel_values[group0_mask].mean(dim=0).to(torch.float64)
+    group1_mean = channel_values[group1_mask].mean(dim=0).to(torch.float64)
+    return torch.abs(group0_mean - group1_mean)
+
+
+def _aggregate_channel_importance(score_tensor: torch.Tensor) -> torch.Tensor:
+    if score_tensor.ndim == 4:
+        return score_tensor.mean(dim=(1, 2, 3))
+    if score_tensor.ndim == 3:
+        return score_tensor.mean(dim=(1, 2))
+    if score_tensor.ndim == 2:
+        return score_tensor.mean(dim=1)
+    if score_tensor.ndim == 1:
+        return score_tensor
+    return score_tensor.reshape(score_tensor.shape[0], -1).mean(dim=1)
+
+
+def _count_total_weights(model):
+    total = 0
+    for _, layer in model.named_modules():
+        if type(layer).__name__ in supported_layers and hasattr(layer, 'weight'):
+            total += int(layer.weight.numel())
+    return total
+
+
+def _count_active_weights(model):
+    total_active = 0
+    for _, layer in model.named_modules():
+        if type(layer).__name__ not in supported_layers or not hasattr(layer, 'weight'):
+            continue
+        if hasattr(layer, 'mask') and layer.mask.shape == layer.weight.shape:
+            total_active += int(layer.mask.detach().sum().item())
+        else:
+            total_active += int(layer.weight.numel())
+    return total_active
+
+
+def _count_channel_weights(model, block_name: str, channel_k: int):
+    modules = dict(model.named_modules())
+    conv0_name, conv1_name, conv2_name = _get_impt_type2_block_layer_names(block_name)
+    total = 0
+
+    def current_mask(layer):
+        if hasattr(layer, 'mask') and layer.mask.shape == layer.weight.shape:
+            return layer.mask.detach()
+        return torch.ones_like(layer.weight)
+
+    if conv0_name in modules and hasattr(modules[conv0_name], 'weight'):
+        conv0_mask = current_mask(modules[conv0_name])
+        if channel_k < conv0_mask.shape[0]:
+            total += int(conv0_mask[channel_k].sum().item())
+
+    if conv1_name in modules and hasattr(modules[conv1_name], 'weight'):
+        conv1_mask = current_mask(modules[conv1_name])
+        if channel_k < conv1_mask.shape[0]:
+            total += int(conv1_mask[channel_k].sum().item())
+
+    if conv2_name is not None and conv2_name in modules and hasattr(modules[conv2_name], 'weight'):
+        conv2_mask = current_mask(modules[conv2_name])
+        if channel_k < conv2_mask.shape[1]:
+            total += int(conv2_mask[:, channel_k].sum().item())
+
+    return total
+
+def _save_channel_pruning_log(
+    selected_channels,
+    score_by_channel_dict,
+    phi_by_layer,
+    perf_by_layer,
+    accum_removed,
+    remove_target,
+    prune_iter,
+    alpha,
+    log_dir='/workspace/FairGRAPE/FairGRAPE/channel_pruning_logs',
+):
+    import datetime
+    os.makedirs(log_dir, exist_ok=True)
+
+    filename = f"alpha{alpha:.1f}_iter{prune_iter + 1:02d}.txt"
+    filepath = os.path.join(log_dir, filename)
+
+    # 블록별 선택된 채널 수 집계
+    block_count = defaultdict(int)
+    for block_name, _ in selected_channels:
+        block_count[block_name] += 1
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write(f"Channel Pruning Log\n")
+        f.write(f"  iteration  : {prune_iter + 1}\n")
+        f.write(f"  alpha      : {alpha:.4f}\n")
+        f.write(f"  timestamp  : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"  remove_target  : {remove_target}\n")
+        f.write(f"  accum_removed  : {accum_removed}\n")
+        f.write(f"  selected_channels : {len(selected_channels)}\n")
+        f.write("=" * 80 + "\n\n")
+
+        # 블록별 요약
+        f.write("[ 블록별 제거 채널 수 ]\n")
+        for block_name in sorted(block_count.keys()):
+            f.write(f"  {block_name}: {block_count[block_name]}채널 제거\n")
+        f.write("\n")
+
+        # 채널별 상세
+        f.write("[ 선택된 채널 상세 ]\n")
+        f.write(f"{'block':<30} {'ch':>5} {'score':>12} {'phi':>12} {'perf':>12} {'weights':>8}\n")
+        f.write("-" * 80 + "\n")
+
+        for block_name, channel_k in selected_channels:
+            key = (block_name, channel_k)
+            score, weight_count = score_by_channel_dict.get(key, (float('nan'), 0))
+
+            # conv[1] 레이어 이름 복원
+            if block_name == 'features.1':
+                conv1_name = 'features.1.conv.1'
+            else:
+                conv1_name = block_name + '.conv.1.0'
+
+            phi_val = float('nan')
+            perf_val = float('nan')
+            if conv1_name in phi_by_layer and channel_k < len(phi_by_layer[conv1_name]):
+                phi_val = phi_by_layer[conv1_name][channel_k].item()
+            if conv1_name in perf_by_layer and channel_k < len(perf_by_layer[conv1_name]):
+                perf_val = perf_by_layer[conv1_name][channel_k].item()
+
+            f.write(
+                f"{block_name:<30} {channel_k:>5} {score:>12.6f} "
+                f"{phi_val:>12.6e} {perf_val:>12.6e} {weight_count:>8}\n"
+            )
+
+    print(f"[채널 pruning 로그 저장] {filepath}")
+
+
+
+def _build_channel_mask_list(model, selected_channels, device):
+    mask_by_layer = {}
+    for name, layer in model.named_modules():
+        if type(layer).__name__ not in supported_layers or not hasattr(layer, 'weight'):
+            continue
+
+        if is_classifier_head(name):
+            mask_by_layer[name] = torch.ones_like(layer.weight, dtype=torch.long)
+        elif hasattr(layer, 'mask') and layer.mask.shape == layer.weight.shape:
+            mask_by_layer[name] = layer.mask.detach().clone().long()
+        else:
+            mask_by_layer[name] = torch.ones_like(layer.weight, dtype=torch.long)
+
+    for block_name, channel_k in selected_channels:
+        conv0_name, conv1_name, conv2_name = _get_impt_type2_block_layer_names(block_name)
+
+        if conv0_name in mask_by_layer and channel_k < mask_by_layer[conv0_name].shape[0]:
+            mask_by_layer[conv0_name][channel_k] = 0
+
+        if conv1_name in mask_by_layer and channel_k < mask_by_layer[conv1_name].shape[0]:
+            mask_by_layer[conv1_name][channel_k] = 0
+
+        if conv2_name is not None and conv2_name in mask_by_layer and channel_k < mask_by_layer[conv2_name].shape[1]:
+            mask_by_layer[conv2_name][:, channel_k] = 0
+
+    mask_list = [mask.to(device) for _, mask in mask_by_layer.items()]
+    print(f"channel mask 생성 완료: 선택 채널={len(selected_channels)}, 총 레이어={len(mask_list)}")
+    return mask_list
+
+
+def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'], stop_batch=10000, masked_grads=True, sensitive_group=None):
+    del masked_grads
+    print("-------------compute_phi_k-------------")
+
+    if sensitive_group not in (None, 'gender'):
+        raise NotImplementedError("impt_type == 2 는 현재 gender 기준 민감 그룹만 지원합니다.")
+
+    if not col_names or col_names[-1] != 'gender':
+        raise ValueError(f"impt_type == 2 는 마지막 라벨 컬럼이 gender 여야 합니다. 현재: {col_names[-1] if col_names else None}")
+
+    target_layers = _get_impt_type2_target_layers(model)
+    if not target_layers:
+        raise RuntimeError("impt_type == 2 대상 conv[1] 레이어를 찾지 못했습니다.")
+
+    if isinstance(test_csv, str):
+        test_frame = pd.read_csv(test_csv)
+    else:
+        test_frame = test_csv.copy()
+
+    if new_img_dir:
+        faces = set(os.listdir(new_img_dir))
+        new_face_name = []
+        face_found_mask = []
+        for i in range(test_frame.shape[0]):
+            face_name_align = split_image_name(test_frame['face_name_align'][i])
+            face_found_mask.append(face_name_align in faces)
+            if face_name_align in faces:
+                new_face_name.append(os.path.join(new_img_dir, face_name_align))
+        test_frame = test_frame[face_found_mask].reset_index(drop=True)
+        test_frame['face_name_align'] = new_face_name
+
+    batch_size = 64
+    test_loader, _ = make_datasets(test_frame, test_frame, True, batch_size, col_used=col_names)
+    criterion = nn.CrossEntropyLoss()
+
+    gap_y0_sums = {}
+    gap_y1_sums = {}
+    gap_y0_counts = defaultdict(int)
+    gap_y1_counts = defaultdict(int)
+    mean_grad_sums = {}
+    mean_grad_counts = defaultdict(int)
+    activations = {}
+    handles = []
+
+    def register_activation_hook(layer_name):
+        def hook(_, __, output):
+            if isinstance(output, (tuple, list)):
+                output = output[0]
+            if not isinstance(output, torch.Tensor):
+                return
+            if output.requires_grad:
+                output.retain_grad()
+            activations[layer_name] = output
+        return hook
+
+    for layer_name, layer in target_layers.items():
+        handles.append(layer.register_forward_hook(register_activation_hook(layer_name)))
+
+    model.eval()
+
+    prev_cudnn_enabled = torch.backends.cudnn.enabled
+    prev_cudnn_benchmark = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.enabled = False
+    torch.backends.cudnn.benchmark = False
+
+    try:
+        for batch_idx, sample_batched in enumerate(test_loader):
+            if batch_idx >= stop_batch:
+                break
+
+            if batch_idx % 50 == 0:
+                print(f"{batch_idx}번째 mini-batch phi 계산 중!")
+
+            image_batched, label_batched = sample_batched
+            image_batched = image_batched.to(device, dtype=torch.float, non_blocking=True).contiguous()
+            label_batched = label_batched.to(device, non_blocking=True).long()
+
+            activations.clear()
+            model.zero_grad(set_to_none=True)
+
+            with torch.backends.cudnn.flags(enabled=False):
+                outputs = safe_forward_with_cudnn_fallback(model, image_batched)
+
+            task_loss = loss_multi_tasks(outputs, label_batched, criterion, output_cols_each_task)
+            task_loss.backward()
+
+            pooled_activations = {}
+            sensitive_a = label_batched[:, -1].long()
+            num_attrs = min(len(output_cols_each_task), label_batched.shape[1] - 1)
+
+            for layer_name, activation in activations.items():
+                pooled_act = _pool_channel_values(activation.detach(), use_abs=False)
+                pooled_activations[layer_name] = pooled_act
+
+                if activation.grad is None:
+                    continue
+
+                pooled_grad = _pool_channel_values(activation.grad.detach(), use_abs=True)
+                batch_mean_grad = pooled_grad.mean(dim=0).to(torch.float64)
+                if layer_name not in mean_grad_sums:
+                    mean_grad_sums[layer_name] = batch_mean_grad
+                else:
+                    mean_grad_sums[layer_name] += batch_mean_grad
+                mean_grad_counts[layer_name] += 1
+
+            for attr_idx in range(num_attrs):
+                target_y = label_batched[:, attr_idx].long()
+                for layer_name, pooled_act in pooled_activations.items():
+                    gap_y0 = _compute_binary_group_gap(pooled_act, target_y, sensitive_a, y_value=0)
+                    if gap_y0 is not None:
+                        if layer_name not in gap_y0_sums:
+                            gap_y0_sums[layer_name] = gap_y0
+                        else:
+                            gap_y0_sums[layer_name] += gap_y0
+                        gap_y0_counts[layer_name] += 1
+
+                    gap_y1 = _compute_binary_group_gap(pooled_act, target_y, sensitive_a, y_value=1)
+                    if gap_y1 is not None:
+                        if layer_name not in gap_y1_sums:
+                            gap_y1_sums[layer_name] = gap_y1
+                        else:
+                            gap_y1_sums[layer_name] += gap_y1
+                        gap_y1_counts[layer_name] += 1
+    finally:
+        for handle in handles:
+            handle.remove()
+        torch.backends.cudnn.enabled = prev_cudnn_enabled
+        torch.backends.cudnn.benchmark = prev_cudnn_benchmark
+
+    phi_by_layer = {}
+    print("phi 레이어별 요약:")
+    for layer_name, layer in target_layers.items():
+        num_channels = int(layer.weight.shape[0])
+        zero_vec = torch.zeros(num_channels, dtype=torch.float64, device=device)
+
+        gap_y0 = gap_y0_sums.get(layer_name, zero_vec)
+        if gap_y0_counts[layer_name] > 0:
+            gap_y0 = gap_y0 / gap_y0_counts[layer_name]
+        else:
+            gap_y0 = zero_vec
+
+        gap_y1 = gap_y1_sums.get(layer_name, zero_vec)
+        if gap_y1_counts[layer_name] > 0:
+            gap_y1 = gap_y1 / gap_y1_counts[layer_name]
+        else:
+            gap_y1 = zero_vec
+
+        activation_gap = gap_y0 + gap_y1
+        mean_gradient = mean_grad_sums.get(layer_name, zero_vec)
+        if mean_grad_counts[layer_name] > 0:
+            mean_gradient = mean_gradient / mean_grad_counts[layer_name]
+        else:
+            mean_gradient = zero_vec
+
+        phi = torch.nan_to_num(activation_gap * mean_gradient, nan=0.0, posinf=0.0, neginf=0.0)
+        phi_by_layer[layer_name] = phi.to(torch.float32)
+        print(
+            f"  ✓ {layer_name}: channels={num_channels}, "
+            f"phi_mean={phi.mean().item():.6e}, phi_max={phi.max().item():.6e}, "
+            f"gap_y0_terms={gap_y0_counts[layer_name]}, gap_y1_terms={gap_y1_counts[layer_name]}, "
+            f"grad_batches={mean_grad_counts[layer_name]}"
+        )
+
+    return phi_by_layer
+
+
 def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_classes = 2, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)],col_names=['race','gender'], para_batch=1, impt_type = 0, stop_batch=10000, delta_p=False,n_jobs=1, network=None, sensitive_group=None):
     def safe_topk_mask(score_tensor, keep_ratio, largest=True):
         flat = score_tensor.flatten().cpu() # Top-k는 CPU에서 계산 추천 (메모리 절약)
@@ -1251,7 +1629,127 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         return build_mask_list(combined_score, keep_ratio, keep_largest_scores=True)
 
     if impt_type == 2:
-        raise NotImplementedError("impt_type == 2 는 아직 구현되지 않았습니다.")
+        if sensitive_classes != 78:
+            print(f"impt_type == 2 참고: 현재 sensitive_classes={sensitive_classes}, CelebA multi-task 기준 78로 전달되는 구성을 가정합니다.")
+        
+        alpha = float(IMPT_TYPE2_ALPHA)
+        import config
+        config.glo_imp_rate = alpha  # ← 추가된 줄
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"impt_type == 2 의 alpha는 0과 1 사이여야 합니다. 현재 값: {alpha}")
+
+        print(f"impt_type == 2: alpha={alpha:.4f}로 채널 단위 fairness-aware pruning 시작")
+
+        phi_by_layer = compute_phi_k(
+            model,
+            test_csv,
+            new_img_dir=new_img_dir,
+            output_cols_each_task=output_cols_each_task,
+            col_names=col_names,
+            stop_batch=stop_batch,
+            masked_grads=masked_grads,
+            sensitive_group=sensitive_group,
+        )
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        importance_score_all, _ = compute_importance(
+            model,
+            None,
+            test_csv,
+            new_img_dir=new_img_dir,
+            masked_grads=masked_grads,
+            output_cols_each_task=output_cols_each_task,
+            col_names=col_names,
+            stop_batch=stop_batch,
+            network=network,
+            sensitive_group=sensitive_group,
+            sensitive_classes=sensitive_classes,
+            imp_batch_size=IMPT_TYPE2_IMPORTANCE_BATCH_SIZE,
+        )
+
+        perf_by_layer = {}
+        for name, score_tensor in importance_score_all.items():
+            if not _is_impt_type2_target_layer(name):
+                continue
+            perf_by_layer[name] = _aggregate_channel_importance(score_tensor).to(torch.float32)
+
+        score_by_channel = []
+        for conv1_name, phi_vec in phi_by_layer.items():
+            perf_vec = perf_by_layer.get(conv1_name)
+            if perf_vec is None:
+                print(f"  - {conv1_name}: 성능 중요도 없음, 스킵")
+                continue
+
+            if perf_vec.shape != phi_vec.shape:
+                print(f"  - {conv1_name}: shape mismatch perf={tuple(perf_vec.shape)} phi={tuple(phi_vec.shape)}, 스킵")
+                continue
+
+            block_name = conv1_name.rsplit('.conv.', 1)[0]
+            phi_scaled = scale_score_tensor(phi_vec)
+            perf_scaled = scale_score_tensor(perf_vec)
+            combined_scores = (alpha * perf_scaled) - ((1.0 - alpha) * phi_scaled)
+
+            for channel_k in range(len(combined_scores)):
+                weight_count = _count_channel_weights(model, block_name, channel_k)
+                if weight_count <= 0:
+                    continue
+                score_by_channel.append((combined_scores[channel_k].item(), block_name, channel_k, weight_count))
+
+        if not score_by_channel:
+            print("impt_type == 2: 제거 가능한 채널 점수를 만들지 못해 기존 마스크를 그대로 반환합니다.")
+            return _build_channel_mask_list(model, [], device)
+
+        total_weights = _count_total_weights(model)
+        total_active = _count_active_weights(model)
+        target_active = int(round(total_weights * (1.0 - prune_ratio)))
+        remove_target = max(total_active - target_active, 0)
+
+        print(
+            f"impt_type == 2 제거량 계산: total_weights={total_weights}, total_active={total_active}, "
+            f"target_active={target_active}, remove_target={remove_target}, candidates={len(score_by_channel)}"
+        )
+
+        score_by_channel.sort(key=lambda x: x[0])
+        selected_channels = []
+        accum_removed = 0
+
+        if remove_target > 0:
+            for score, block_name, channel_k, weight_count in score_by_channel:
+                new_accum = accum_removed + weight_count
+                if abs(new_accum - remove_target) <= abs(accum_removed - remove_target):
+                    selected_channels.append((block_name, channel_k))
+                    accum_removed = new_accum
+                    if accum_removed >= remove_target:
+                        break
+                else:
+                    break
+
+        print(
+            f"impt_type == 2 채널 선택 완료: selected={len(selected_channels)}, "
+            f"estimated_removed={accum_removed}, remove_target={remove_target}"
+        )
+
+        # 로그 저장
+        import config as _config
+        score_by_channel_dict = {
+            (b, k): (s, w)
+            for s, b, k, w in score_by_channel
+        }
+        _save_channel_pruning_log(
+            selected_channels=selected_channels,
+            score_by_channel_dict=score_by_channel_dict,
+            phi_by_layer=phi_by_layer,
+            perf_by_layer=perf_by_layer,
+            accum_removed=accum_removed,
+            remove_target=remove_target,
+            prune_iter=_config.glo_prune_iter,
+            alpha=alpha,
+            log_dir='/workspace/FairGRAPE/FairGRAPE/channel_pruning_logs',
+        )
+
+        return _build_channel_mask_list(model, selected_channels, device)
 
     raise ValueError(f"지원하지 않는 impt_type 입니다: {impt_type}")
 

@@ -2,6 +2,7 @@ import os
 import shutil
 import zipfile
 import tarfile
+import copy
 import gdown
 import torch
 import torch.nn as nn
@@ -189,6 +190,13 @@ def check_fairness0(trained_model,
                     output_cols_each_task=[(0, 7)],
                     sensitive_group="gender"):
 
+    def should_fallback_to_cpu(error):
+        err = str(error)
+        return (
+            'no kernel image is available for execution on the device' in err
+            or 'CUDA error: no kernel image is available for execution on the device' in err
+        )
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     # (A) 모델 로드: 직접 모델 객체를 받았는지, 파일 경로(str)를 받았는지 구분
@@ -207,6 +215,7 @@ def check_fairness0(trained_model,
 
     model = model.to(device)
     model.eval()
+    cpu_eval_model = None
 
     # (B) 전처리 파이프라인(transform)
     trans = transforms.Compose([
@@ -241,7 +250,20 @@ def check_fairness0(trained_model,
         image = trans(image)
         image = image.view(1, *image.shape).to(device)
 
-        output_i = safe_forward_with_cudnn_fallback(model, image).cpu().detach().numpy()  # [1, n_class] 형태
+        try:
+            output_i = safe_forward_with_cudnn_fallback(model, image).cpu().detach().numpy()  # [1, n_class] 형태
+        except RuntimeError as error:
+            if device.type != 'cuda' or not should_fallback_to_cpu(error):
+                raise
+
+            print(f"[경고] fairness 저장 중 CUDA kernel image 오류 발생, CPU 추론으로 전환합니다: {error}")
+            if cpu_eval_model is None:
+                cpu_eval_model = copy.deepcopy(model).to('cpu')
+                cpu_eval_model.eval()
+            model = cpu_eval_model
+            device = torch.device('cpu')
+            image = image.to(device)
+            output_i = safe_forward_with_cudnn_fallback(model, image).cpu().detach().numpy()
         outputs = np.squeeze(output_i)                  # [n_class]
 
         for col, (start_idx, end_idx) in zip(col_used, output_cols_each_task):

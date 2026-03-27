@@ -198,15 +198,15 @@ def aggregate_tensor_to_channels(score_tensor: torch.Tensor) -> np.ndarray:
     score_tensor = score_tensor.detach().cpu()
 
     if score_tensor.ndim == 4:
-        aggregated = score_tensor.sum(dim=(1, 2, 3))
+        aggregated = score_tensor.mean(dim=(1, 2, 3))  # sum → mean
     elif score_tensor.ndim == 3:
-        aggregated = score_tensor.sum(dim=(1, 2))
+        aggregated = score_tensor.mean(dim=(1, 2))     # sum → mean
     elif score_tensor.ndim == 2:
-        aggregated = score_tensor.sum(dim=1)
+        aggregated = score_tensor.mean(dim=1)          # sum → mean
     elif score_tensor.ndim == 1:
         aggregated = score_tensor
     else:
-        aggregated = score_tensor.reshape(score_tensor.shape[0], -1).sum(dim=1)
+        aggregated = score_tensor.reshape(score_tensor.shape[0], -1).mean(dim=1)  # sum → mean
 
     return aggregated.numpy().astype(np.float64)
 

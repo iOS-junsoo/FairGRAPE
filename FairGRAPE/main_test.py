@@ -6,6 +6,7 @@ import math
 import os
 import argparse
 import datetime
+import copy
 import pandas as pd
 import numpy as np
 
@@ -41,6 +42,7 @@ def experiment(args):
     para_batch = args.para_batch
     stop_batch = args.stop_batch
     use_grl = not args.no_grl
+    skip_readable_check = args.skip_readable_check
 
     seed = args.seed
     setseed(seed)
@@ -129,7 +131,7 @@ def experiment(args):
     else:
         raise NotImplementedError("{} is not implemented!".format(dataset))
 
-    if dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA']:
+    if dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA'] and not skip_readable_check:
         unreadable_report_dir = os.path.join('data_quality_logs', dataset)
         frames = filter_readable_images_in_frames(
             frames,
@@ -143,6 +145,8 @@ def experiment(args):
                 report_dir=unreadable_report_dir,
                 report_prefix='excluded_images_minority',
             )
+    elif dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA']:
+        print('이미지 가독성 검사를 건너뜁니다 (--skip_readable_check).')
 
     lr_schedule = [1e-4, 1e-5, 1e-6]
     # 여기서 make_datasets 호출 시 shuffle=True로 되어 있음
@@ -336,7 +340,34 @@ def experiment(args):
             
             # 1. 모델 평가
             best_model.eval()
-            device = torch.device('cuda:0')
+            eval_device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+            eval_model = best_model
+            cpu_eval_model = None
+
+            def should_fallback_to_cpu(error):
+                err = str(error)
+                return (
+                    'no kernel image is available for execution on the device' in err
+                    or 'CUDA error: no kernel image is available for execution on the device' in err
+                )
+
+            def forward_for_eval(model_for_eval, images, current_device, cpu_model_for_eval):
+                try:
+                    outputs_local = safe_forward_with_cudnn_fallback(model_for_eval, images)
+                    return torch.squeeze(outputs_local), model_for_eval, current_device, cpu_model_for_eval
+                except RuntimeError as error:
+                    if current_device.type != 'cuda' or not should_fallback_to_cpu(error):
+                        raise
+
+                    print(f"[경고] prune 후 평가에서 CUDA kernel image 오류 발생, CPU 평가로 전환합니다: {error}")
+                    if cpu_model_for_eval is None:
+                        cpu_model_for_eval = copy.deepcopy(model_for_eval).to('cpu')
+                        cpu_model_for_eval.eval()
+                    model_for_eval = cpu_model_for_eval
+                    current_device = torch.device('cpu')
+                    images = images.to(current_device, dtype=torch.float)
+                    outputs_local = safe_forward_with_cudnn_fallback(model_for_eval, images)
+                    return torch.squeeze(outputs_local), model_for_eval, current_device, cpu_model_for_eval
             
             # 성능 지표 계산을 위한 변수 초기화
             running_loss = 0.0
@@ -352,12 +383,16 @@ def experiment(args):
             with torch.no_grad():
                 for sample_batched in dataloaders['test']:
                     image_batched, label_batched = sample_batched
-                    image_batched = image_batched.to(device, dtype=torch.float)
-                    label_batched = label_batched.to(device)
+                    image_batched = image_batched.to(eval_device, dtype=torch.float)
+                    label_batched = label_batched.to(eval_device)
                     task_labels = label_batched[:, 0:len(col_used_training)]
                     gender_batched = label_batched[:, -1]
                     
-                    outputs = torch.squeeze(safe_forward_with_cudnn_fallback(best_model, image_batched))
+                    outputs, eval_model, eval_device, cpu_eval_model = forward_for_eval(eval_model, image_batched, eval_device, cpu_eval_model)
+                    if label_batched.device != eval_device:
+                        label_batched = label_batched.to(eval_device)
+                        task_labels = task_labels.to(eval_device)
+                        gender_batched = gender_batched.to(eval_device)
                     loss, acc = loss_multi_tasks(outputs, label_batched, criterion, 
                                             output_cols_each_task, True)
                     
@@ -628,6 +663,7 @@ if __name__ == "__main__":
     parser.add_argument('--no_grl', action='store_true', help='재학습에서 GRL 기반 adversarial debiasing을 비활성화')
     parser.add_argument('--seed', type=int, default=42, help='랜덤 시드 설정 (재현성 확보를 위함)')
     parser.add_argument('--save_model_iter', nargs='+', type=int, default=-1, help='특정 가지치기 iteration(또는 epoch)에 모델을 저장할지 여부')
+    parser.add_argument('--skip_readable_check', action='store_true', help='dlib 기반 이미지 가독성 검사를 건너뜀')
 
 
 

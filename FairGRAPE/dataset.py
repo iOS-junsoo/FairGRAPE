@@ -10,7 +10,10 @@ from pathlib import Path
 from collections import Counter
 import imgaug as ia
 from imgaug import augmenters as iaa
-import dlib
+try:
+    import dlib
+except ImportError:
+    dlib = None
 import time
 import os
 from torch.utils.data import Dataset, DataLoader
@@ -310,7 +313,10 @@ class FaceDataset(Dataset):
             labels.append(self.data_frame.loc[idx, col])
 
         # 이미지를 ndarray 형태(H*W*C)로 읽기
-        image = dlib.load_rgb_image(img_name) 
+        if dlib is None:
+            image = np.asarray(Image.open(img_name).convert('RGB'))
+        else:
+            image = dlib.load_rgb_image(img_name)
         
         if self.transform:
             image = self.transform(image)
