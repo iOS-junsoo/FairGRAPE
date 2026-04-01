@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-03-29T15:30:53.197115",
+  "experiment": "ΔEO remeasurement: single attr (Attractive) → 39-attr mean EO",
+  "reason": "phi(compute_phi_k)는 39개 속성 전체 gap 누적, 실제 pruning도 39개 평균 EO 사용. 기존 zeroing은 Attractive 1개만 측정하여 조건 불일치.",
+  "checkpoint": "/workspace/FairGRAPE/FairGRAPE/trained_model/unpruned/CelebA_unpruned_classes_bygender_mobilenetv2_0.pt",
+  "eo_method": "39개 속성 각각 EO 계산 후 평균 (train_and_val.py와 동일)",
+  "phi_perf_source": "/workspace/FairGRAPE/FairGRAPE/activate_experiment/6_layer_activate_dff_corr/results_v2",
+  "split": "val",
+  "max_batches": null,
+  "baseline_eo_all_attrs": 0.17054892370443422,
+  "seed": 42,
+  "device": "cuda",
+  "total_time_sec": 48496.57027101517
+}

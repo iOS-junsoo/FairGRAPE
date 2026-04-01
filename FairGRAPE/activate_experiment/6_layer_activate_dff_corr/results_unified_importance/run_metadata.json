@@ -1,0 +1,10 @@
+{
+  "timestamp": "2026-03-28T03:18:08.377841",
+  "experiment": "Unified importance comparison: conv1-only vs conv0+conv1+conv2",
+  "checkpoint": "/workspace/FairGRAPE/FairGRAPE/trained_model/unpruned/CelebA_unpruned_classes_bygender_mobilenetv2_0.pt",
+  "zeroing_dir": "/workspace/FairGRAPE/FairGRAPE/activate_experiment/6_layer_activate_dff_corr/results_unified",
+  "method_old": "conv1 only: mean((weight * gradient)^2) per output channel",
+  "method_new": "conv0+conv1+conv2: sum of per-channel mean((weight * gradient)^2)",
+  "seed": 42,
+  "device": "cuda"
+}

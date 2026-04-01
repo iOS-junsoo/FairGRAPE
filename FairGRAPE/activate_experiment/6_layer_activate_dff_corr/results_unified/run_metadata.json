@@ -1,0 +1,66 @@
+{
+  "timestamp": "2026-03-27T23:50:36.626801",
+  "experiment": "B: unified conv0+conv1+conv2 zeroing",
+  "checkpoint": "/workspace/FairGRAPE/FairGRAPE/trained_model/unpruned/CelebA_unpruned_classes_bygender_mobilenetv2_0.pt",
+  "target_attr": "Attractive",
+  "target_attr_index": 2,
+  "zeroing_scope": "conv0+conv1+conv2 (matches actual pruning)",
+  "phi_source": "existing CSV from 6-layer experiment (compute_phi_k, 39-attr aggregated)",
+  "perf_source": "existing CSV from 6-layer experiment (compute_importance)",
+  "split": "val",
+  "max_batches": null,
+  "seed": 42,
+  "device": "cuda",
+  "total_time_sec": 26322.14085626602,
+  "layers_completed": 6,
+  "block_mapping": {
+    "features.1.conv.1": {
+      "block": "features.1",
+      "layers": [
+        "features.1.conv.0.0",
+        "features.1.conv.1",
+        null
+      ]
+    },
+    "features.2.conv.1.0": {
+      "block": "features.2",
+      "layers": [
+        "features.2.conv.0.0",
+        "features.2.conv.1.0",
+        "features.2.conv.2"
+      ]
+    },
+    "features.3.conv.1.0": {
+      "block": "features.3",
+      "layers": [
+        "features.3.conv.0.0",
+        "features.3.conv.1.0",
+        "features.3.conv.2"
+      ]
+    },
+    "features.6.conv.1.0": {
+      "block": "features.6",
+      "layers": [
+        "features.6.conv.0.0",
+        "features.6.conv.1.0",
+        "features.6.conv.2"
+      ]
+    },
+    "features.10.conv.1.0": {
+      "block": "features.10",
+      "layers": [
+        "features.10.conv.0.0",
+        "features.10.conv.1.0",
+        "features.10.conv.2"
+      ]
+    },
+    "features.16.conv.1.0": {
+      "block": "features.16",
+      "layers": [
+        "features.16.conv.0.0",
+        "features.16.conv.1.0",
+        "features.16.conv.2"
+      ]
+    }
+  }
+}

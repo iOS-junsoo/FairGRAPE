@@ -1,0 +1,29 @@
+{
+  "timestamp": "2026-03-28T16:08:32.093853",
+  "experiment": "Correlation experiment v2: unified importance + unified zeroing",
+  "version_changes": [
+    "성능 기여도: conv1-only → conv0+conv1+conv2 통합 합산",
+    "zeroing: conv1-only → conv0+conv1+conv2 통합 (BlockChannelZeroing)",
+    "측정: ΔEO만 → ΔEO + ΔAcc 동시 (한 번의 순전파)",
+    "features.1 제외 (conv0/conv1 채널 수 불일치) → 16개 레이어"
+  ],
+  "checkpoint": "/workspace/FairGRAPE/FairGRAPE/trained_model/unpruned/CelebA_unpruned_classes_bygender_mobilenetv2_0.pt",
+  "target_attr": "Attractive",
+  "target_attr_index": 2,
+  "split": "val",
+  "stop_batch": 10000,
+  "importance_batch_size": 64,
+  "max_batches": null,
+  "seed": 42,
+  "device": "cuda",
+  "total_time_sec": 41441.80353760719,
+  "layers_completed": 6,
+  "selected_layers": [
+    "features.4.conv.1.0",
+    "features.11.conv.1.0",
+    "features.10.conv.1.0",
+    "features.9.conv.1.0",
+    "features.13.conv.1.0",
+    "features.17.conv.1.0"
+  ]
+}

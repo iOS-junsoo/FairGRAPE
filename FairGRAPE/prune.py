@@ -1073,7 +1073,9 @@ def compute_gender_gradient_gap_importance(model, test_csv, new_img_dir=None, ma
 
 
 def _is_impt_type2_target_layer(name: str) -> bool:
-    if name == 'features.1.conv.1':
+    if name == 'features.1.conv.0.0':  # features.1 DW(32ch) 기준으로 변경
+        return True
+    if name == 'features.18.0':
         return True
     if name.startswith('features.') and name.endswith('.conv.1.0'):
         return not name.startswith('features.18.')
@@ -1090,7 +1092,11 @@ def _get_impt_type2_target_layers(model):
 
 def _get_impt_type2_block_layer_names(block_name: str):
     if block_name == 'features.1':
-        return f'{block_name}.conv.0.0', f'{block_name}.conv.1', None
+        # DW(32ch)를 채널 기준으로, PW project는 입력 채널(dim 1)로 묶음 제거
+        return f'{block_name}.conv.0.0', None, f'{block_name}.conv.1'
+    if block_name == 'features.18':
+        # classifier.1은 별도 weight-level pruning으로 분리
+        return 'features.18.0', None, None
     return f'{block_name}.conv.0.0', f'{block_name}.conv.1.0', f'{block_name}.conv.2'
 
 
@@ -1150,6 +1156,23 @@ def _count_active_weights(model):
     return total_active
 
 
+def _count_all_channel_weights(model):
+    """채널 pruning 대상 블록(features.1~18)의 conv0+conv1+conv2 전체 weight 수 (마스크 무관).
+    remove_target 기준으로 사용 - _count_channel_weights와 동일한 범위."""
+    modules = dict(model.named_modules())
+    total = 0
+    for block_num in range(1, 19):
+        block_name = f'features.{block_num}'
+        conv0_name, conv1_name, conv2_name = _get_impt_type2_block_layer_names(block_name)
+        if conv0_name in modules and hasattr(modules[conv0_name], 'weight'):
+            total += modules[conv0_name].weight.numel()
+        if conv1_name is not None and conv1_name in modules and hasattr(modules[conv1_name], 'weight'):
+            total += modules[conv1_name].weight.numel()
+        if conv2_name is not None and conv2_name in modules and hasattr(modules[conv2_name], 'weight'):
+            total += modules[conv2_name].weight.numel()
+    return total
+
+
 def _count_channel_weights(model, block_name: str, channel_k: int):
     modules = dict(model.named_modules())
     conv0_name, conv1_name, conv2_name = _get_impt_type2_block_layer_names(block_name)
@@ -1186,7 +1209,9 @@ def _save_channel_pruning_log(
     remove_target,
     prune_iter,
     alpha,
+    model=None,
     log_dir='/workspace/FairGRAPE/FairGRAPE/channel_pruning_logs',
+    weight_masks_override=None,
 ):
     import datetime
     os.makedirs(log_dir, exist_ok=True)
@@ -1199,6 +1224,53 @@ def _save_channel_pruning_log(
     for block_name, _ in selected_channels:
         block_count[block_name] += 1
 
+    # 레이어별 총 채널 수 및 누적 제거 채널 수 계산
+    layer_channel_stats = {}  # block_name -> (total_ch, cumul_removed)
+    if model is not None:
+        modules = dict(model.named_modules())
+        for block_num in range(0, 19):
+            block_name = f'features.{block_num}'
+            if block_num == 0:
+                # features.0: weight-level pruning 대상, 실제 마스크 통계로 계산
+                layer_name = 'features.0.0'
+                if layer_name in modules and hasattr(modules[layer_name], 'weight'):
+                    w = modules[layer_name].weight
+                    total_ch = w.numel()
+                    # weight_masks_override 우선 사용 (이번 iter 마스크가 아직 모델에 반영 전일 때)
+                    if weight_masks_override is not None and layer_name in weight_masks_override:
+                        cumul_zero = int((weight_masks_override[layer_name] == 0).sum().item())
+                    elif hasattr(modules[layer_name], 'mask') and modules[layer_name].mask.shape == w.shape:
+                        cumul_zero = int((modules[layer_name].mask == 0).sum().item())
+                    else:
+                        cumul_zero = 0
+                    layer_channel_stats[block_name] = (total_ch, cumul_zero)
+            else:
+                conv0_name, conv1_name, _ = _get_impt_type2_block_layer_names(block_name)
+                ref_name = conv0_name
+                if ref_name in modules and hasattr(modules[ref_name], 'weight'):
+                    w = modules[ref_name].weight
+                    total_ch = w.shape[0]
+                    # 마스크 기준 누적 제거 채널 수: 해당 채널의 모든 weight가 0인 채널
+                    if hasattr(modules[ref_name], 'mask') and modules[ref_name].mask.shape == w.shape:
+                        mask = modules[ref_name].mask
+                        cumul_removed = int((mask.view(total_ch, -1).sum(dim=1) == 0).sum().item())
+                    else:
+                        cumul_removed = 0
+                    layer_channel_stats[block_name] = (total_ch, cumul_removed)
+        # classifier: weight-level pruning 대상, 실제 마스크 통계로 계산
+        clf_name = 'classifier.1'
+        if clf_name in modules and hasattr(modules[clf_name], 'weight'):
+            w_clf = modules[clf_name].weight
+            total_clf = w_clf.numel()
+            # weight_masks_override 우선 사용 (이번 iter 마스크가 아직 모델에 반영 전일 때)
+            if weight_masks_override is not None and clf_name in weight_masks_override:
+                cumul_clf = int((weight_masks_override[clf_name] == 0).sum().item())
+            elif hasattr(modules[clf_name], 'mask') and modules[clf_name].mask.shape == w_clf.shape:
+                cumul_clf = int((modules[clf_name].mask == 0).sum().item())
+            else:
+                cumul_clf = 0
+            layer_channel_stats['classifier'] = (total_clf, cumul_clf)
+
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
         f.write(f"Channel Pruning Log\n")
@@ -1209,6 +1281,31 @@ def _save_channel_pruning_log(
         f.write(f"  accum_removed  : {accum_removed}\n")
         f.write(f"  selected_channels : {len(selected_channels)}\n")
         f.write("=" * 80 + "\n\n")
+
+        # 레이어별 채널 제거 비율 요약
+        f.write("[ 레이어별 채널 제거 비율 ]\n")
+        f.write(f"  {'layer':<20} {'total_ch':>8} {'this_iter':>10} {'cumul':>8} {'cumul_%':>8}\n")
+        f.write("  " + "-" * 58 + "\n")
+        for block_num in range(0, 19):
+            block_name = f'features.{block_num}'
+            this_iter = block_count.get(block_name, 0)
+            if block_name in layer_channel_stats:
+                total_ch, cumul_removed = layer_channel_stats[block_name]
+                # 누적에 이번 iter 포함
+                cumul_after = cumul_removed + this_iter
+                ratio = cumul_after / total_ch * 100 if total_ch > 0 else 0.0
+                note = ' (weight-level)' if block_num == 0 else ''
+                f.write(f"  {block_name:<20} {total_ch:>8} {this_iter:>10} {cumul_after:>8} {ratio:>7.1f}%{note}\n")
+            else:
+                f.write(f"  {block_name:<20} {'N/A':>8} {this_iter:>10} {'N/A':>8} {'N/A':>8}\n")
+        # classifier
+        clf_block = 'classifier'
+        this_iter_clf = block_count.get(clf_block, 0)
+        if clf_block in layer_channel_stats:
+            total_ch, cumul_removed = layer_channel_stats[clf_block]
+            ratio = cumul_removed / total_ch * 100 if total_ch > 0 else 0.0
+            f.write(f"  {'classifier':<20} {total_ch:>8} {this_iter_clf:>10} {cumul_removed:>8} {ratio:>7.1f}% (weight-level)\n")
+        f.write("\n")
 
         # 블록별 요약
         f.write("[ 블록별 제거 채널 수 ]\n")
@@ -1225,9 +1322,11 @@ def _save_channel_pruning_log(
             key = (block_name, channel_k)
             score, weight_count = score_by_channel_dict.get(key, (float('nan'), 0))
 
-            # conv[1] 레이어 이름 복원
+            # phi/perf_by_layer 키 복원 (ref_name: DW 레이어 또는 conv0)
             if block_name == 'features.1':
-                conv1_name = 'features.1.conv.1'
+                conv1_name = 'features.1.conv.0.0'  # DW(32ch) 기준
+            elif block_name == 'features.18':
+                conv1_name = 'features.18.0'
             else:
                 conv1_name = block_name + '.conv.1.0'
 
@@ -1254,7 +1353,11 @@ def _build_channel_mask_list(model, selected_channels, device):
             continue
 
         if is_classifier_head(name):
-            mask_by_layer[name] = torch.ones_like(layer.weight, dtype=torch.long)
+            # 기존 weight-level 마스크가 있으면 누적 유지 (features.18 채널 pruning 시 열 단위로 추가 적용됨)
+            if hasattr(layer, 'mask') and layer.mask.shape == layer.weight.shape:
+                mask_by_layer[name] = layer.mask.detach().clone().long()
+            else:
+                mask_by_layer[name] = torch.ones_like(layer.weight, dtype=torch.long)
         elif hasattr(layer, 'mask') and layer.mask.shape == layer.weight.shape:
             mask_by_layer[name] = layer.mask.detach().clone().long()
         else:
@@ -1290,6 +1393,18 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
     target_layers = _get_impt_type2_target_layers(model)
     if not target_layers:
         raise RuntimeError("impt_type == 2 대상 conv[1] 레이어를 찾지 못했습니다.")
+
+    # features.0.0: weight-level phi 계산을 위한 별도 hook 대상
+    modules_dict = dict(model.named_modules())
+    weight_phi_target_names = ['features.0.0']  # classifier.1은 features.18 phi 재사용
+    weight_grad_sums = {}
+    weight_grad_counts = defaultdict(int)
+    # features.0.0의 activation gap 누적 (channel-level과 동일 방식)
+    f0_gap_y0_sums = {}
+    f0_gap_y0_counts = defaultdict(int)
+    f0_gap_y1_sums = {}
+    f0_gap_y1_counts = defaultdict(int)
+    f0_activations = {}
 
     if isinstance(test_csv, str):
         test_frame = pd.read_csv(test_csv)
@@ -1334,6 +1449,21 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
 
     for layer_name, layer in target_layers.items():
         handles.append(layer.register_forward_hook(register_activation_hook(layer_name)))
+
+    # features.0.0 hook 등록 (weight-level phi용 activation 수집)
+    def register_f0_hook(layer_name):
+        def hook(_, __, output):
+            if isinstance(output, (tuple, list)):
+                output = output[0]
+            if not isinstance(output, torch.Tensor):
+                return
+            if output.requires_grad:
+                output.retain_grad()
+            f0_activations[layer_name] = output
+        return hook
+
+    if 'features.0.0' in modules_dict:
+        handles.append(modules_dict['features.0.0'].register_forward_hook(register_f0_hook('features.0.0')))
 
     model.eval()
 
@@ -1400,6 +1530,31 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
                         else:
                             gap_y1_sums[layer_name] += gap_y1
                         gap_y1_counts[layer_name] += 1
+
+            # features.0.0 activation gap 누적 (weight-level phi용)
+            if 'features.0.0' in f0_activations:
+                f0_act = f0_activations['features.0.0']
+                pooled_f0 = _pool_channel_values(f0_act.detach(), use_abs=False)
+                for attr_idx in range(num_attrs):
+                    target_y = label_batched[:, attr_idx].long()
+                    gap_y0 = _compute_binary_group_gap(pooled_f0, target_y, sensitive_a, y_value=0)
+                    if gap_y0 is not None:
+                        f0_gap_y0_sums['features.0.0'] = f0_gap_y0_sums.get('features.0.0', torch.zeros_like(gap_y0)) + gap_y0
+                        f0_gap_y0_counts['features.0.0'] += 1
+                    gap_y1 = _compute_binary_group_gap(pooled_f0, target_y, sensitive_a, y_value=1)
+                    if gap_y1 is not None:
+                        f0_gap_y1_sums['features.0.0'] = f0_gap_y1_sums.get('features.0.0', torch.zeros_like(gap_y1)) + gap_y1
+                        f0_gap_y1_counts['features.0.0'] += 1
+
+            # features.0.0, classifier.1 weight gradient 누적
+            for wname in ['features.0.0', 'classifier.1']:
+                if wname not in modules_dict:
+                    continue
+                wlayer = modules_dict[wname]
+                if hasattr(wlayer, 'weight') and wlayer.weight.grad is not None:
+                    grad_abs = wlayer.weight.grad.detach().abs().to(torch.float64)
+                    weight_grad_sums[wname] = weight_grad_sums.get(wname, torch.zeros_like(grad_abs)) + grad_abs
+                    weight_grad_counts[wname] += 1
     finally:
         for handle in handles:
             handle.remove()
@@ -1440,7 +1595,38 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
             f"grad_batches={mean_grad_counts[layer_name]}"
         )
 
-    return phi_by_layer
+    # weight-level phi 계산 (features.0.0, classifier.1)
+    phi_weight_by_layer = {}
+    print("weight-level phi 요약:")
+
+    # features.0.0: activation_gap_k × mean_|weight.grad|[k, :, :, :]
+    if 'features.0.0' in modules_dict and 'features.0.0' in weight_grad_sums:
+        f0_layer = modules_dict['features.0.0']
+        n_ch = f0_layer.weight.shape[0]
+        zero_vec = torch.zeros(n_ch, dtype=torch.float64, device=device)
+        gap_y0 = f0_gap_y0_sums.get('features.0.0', zero_vec)
+        if f0_gap_y0_counts['features.0.0'] > 0:
+            gap_y0 = gap_y0 / f0_gap_y0_counts['features.0.0']
+        gap_y1 = f0_gap_y1_sums.get('features.0.0', zero_vec)
+        if f0_gap_y1_counts['features.0.0'] > 0:
+            gap_y1 = gap_y1 / f0_gap_y1_counts['features.0.0']
+        activation_gap_f0 = (gap_y0 + gap_y1).to(torch.float64)  # shape [32]
+        mean_wgrad_f0 = weight_grad_sums['features.0.0'] / weight_grad_counts['features.0.0']  # [32,3,3,3]
+        # broadcast activation_gap per output channel
+        gap_broadcast = activation_gap_f0.view(-1, *([1] * (mean_wgrad_f0.ndim - 1)))
+        phi_w_f0 = torch.nan_to_num(gap_broadcast * mean_wgrad_f0, nan=0.0, posinf=0.0, neginf=0.0)
+        phi_weight_by_layer['features.0.0'] = phi_w_f0.to(torch.float32)
+        print(f"  ✓ features.0.0: shape={tuple(phi_w_f0.shape)}, phi_mean={phi_w_f0.mean().item():.6e}")
+
+    # classifier.1: phi_features18[k] × mean_|weight.grad|[i, k]
+    if 'classifier.1' in weight_grad_sums and 'features.18.0' in phi_by_layer:
+        phi_f18 = phi_by_layer['features.18.0'].to(torch.float64).to(device)  # [1280]
+        mean_wgrad_cls = weight_grad_sums['classifier.1'] / weight_grad_counts['classifier.1']  # [num_cls, 1280]
+        phi_w_cls = torch.nan_to_num(phi_f18.unsqueeze(0) * mean_wgrad_cls, nan=0.0, posinf=0.0, neginf=0.0)
+        phi_weight_by_layer['classifier.1'] = phi_w_cls.to(torch.float32)
+        print(f"  ✓ classifier.1: shape={tuple(phi_w_cls.shape)}, phi_mean={phi_w_cls.mean().item():.6e}")
+
+    return phi_by_layer, phi_weight_by_layer
 
 
 def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_classes = 2, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)],col_names=['race','gender'], para_batch=1, impt_type = 0, stop_batch=10000, delta_p=False,n_jobs=1, network=None, sensitive_group=None):
@@ -1640,7 +1826,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 
         print(f"impt_type == 2: alpha={alpha:.4f}로 채널 단위 fairness-aware pruning 시작")
 
-        phi_by_layer = compute_phi_k(
+        phi_by_layer, phi_weight_by_layer = compute_phi_k(
             model,
             test_csv,
             new_img_dir=new_img_dir,
@@ -1669,11 +1855,41 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             imp_batch_size=IMPT_TYPE2_IMPORTANCE_BATCH_SIZE,
         )
 
+        # ── 채널 단위 성능 기여도 (conv0+conv1+conv2 합산) ──
+        # conv0/conv1: 출력 채널(dim 0) 기준 집계
+        # conv2(PW project): 입력 채널(dim 1) 기준 집계 → mean(dim=(0,2,3))
         perf_by_layer = {}
-        for name, score_tensor in importance_score_all.items():
-            if not _is_impt_type2_target_layer(name):
-                continue
-            perf_by_layer[name] = _aggregate_channel_importance(score_tensor).to(torch.float32)
+        for block_num in range(1, 19):
+            block_name = f'features.{block_num}'
+            conv0_name, conv1_name, conv2_name = _get_impt_type2_block_layer_names(block_name)
+            # ref_name: phi_by_layer와 동일한 키 (DW 레이어 or conv0)
+            ref_name = conv1_name if conv1_name is not None else conv0_name
+            combined = None
+
+            if conv0_name in importance_score_all:
+                score = _aggregate_channel_importance(importance_score_all[conv0_name]).to(torch.float32)
+                combined = score
+
+            if conv1_name is not None and conv1_name in importance_score_all:
+                score = _aggregate_channel_importance(importance_score_all[conv1_name]).to(torch.float32)
+                combined = score if combined is None else combined + score
+
+            if conv2_name is not None and conv2_name in importance_score_all:
+                s = importance_score_all[conv2_name].to(torch.float32)
+                # 입력 채널(dim 1) 기준: mean over (out_ch, h, w)
+                if s.ndim == 4:
+                    score = s.mean(dim=(0, 2, 3))
+                elif s.ndim == 2:
+                    score = s.mean(dim=0)
+                else:
+                    score = s.mean(dim=0)
+                if combined is not None and combined.shape == score.shape:
+                    combined = combined + score
+                elif combined is None:
+                    combined = score
+
+            if combined is not None:
+                perf_by_layer[ref_name] = combined
 
         score_by_channel = []
         for conv1_name, phi_vec in phi_by_layer.items():
@@ -1686,7 +1902,12 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                 print(f"  - {conv1_name}: shape mismatch perf={tuple(perf_vec.shape)} phi={tuple(phi_vec.shape)}, 스킵")
                 continue
 
-            block_name = conv1_name.rsplit('.conv.', 1)[0]
+            # features.18.0 → block_name = features.18, 나머지는 기존 방식
+            if conv1_name == 'features.18.0':
+                block_name = 'features.18'
+            else:
+                block_name = conv1_name.rsplit('.conv.', 1)[0]
+
             phi_scaled = scale_score_tensor(phi_vec)
             perf_scaled = scale_score_tensor(perf_vec)
             combined_scores = (alpha * perf_scaled) - ((1.0 - alpha) * phi_scaled)
@@ -1701,37 +1922,147 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             print("impt_type == 2: 제거 가능한 채널 점수를 만들지 못해 기존 마스크를 그대로 반환합니다.")
             return _build_channel_mask_list(model, [], device)
 
-        total_weights = _count_total_weights(model)
-        total_active = _count_active_weights(model)
-        target_active = int(round(total_weights * (1.0 - prune_ratio)))
-        remove_target = max(total_active - target_active, 0)
+        # ── remove_target: 채널 pruning 대상(features.1~18) weight만 기준으로 계산 (버그 수정) ──
+        total_channel_weights = _count_all_channel_weights(model)
+        active_channel_weights = sum(w for _, _, _, w in score_by_channel)
+        target_active_channel = int(round(total_channel_weights * (1.0 - prune_ratio)))
+        remove_target = max(active_channel_weights - target_active_channel, 0)
 
         print(
-            f"impt_type == 2 제거량 계산: total_weights={total_weights}, total_active={total_active}, "
-            f"target_active={target_active}, remove_target={remove_target}, candidates={len(score_by_channel)}"
+            f"impt_type == 2 제거량 계산 (채널 기준): total_channel_weights={total_channel_weights}, "
+            f"active_channel_weights={active_channel_weights}, target_active_channel={target_active_channel}, "
+            f"remove_target={remove_target}, candidates={len(score_by_channel)}"
         )
 
-        score_by_channel.sort(key=lambda x: x[0])
+        # ── 최소 10% 잔존 보호: 블록별 전체/누적 제거 채널 수 계산 ──
+        _modules = dict(model.named_modules())
+        block_total_channels = {}
+        block_removed_channels = {}
+        for _bn_num in range(1, 19):
+            _bn = f'features.{_bn_num}'
+            _c0, _c1, _ = _get_impt_type2_block_layer_names(_bn)
+            _ref = _c1 if _c1 is not None else _c0
+            if _ref in _modules and hasattr(_modules[_ref], 'weight'):
+                _total_ch = _modules[_ref].weight.shape[0]
+                block_total_channels[_bn] = _total_ch
+                if hasattr(_modules[_ref], 'mask') and _modules[_ref].mask.shape == _modules[_ref].weight.shape:
+                    _mask = _modules[_ref].mask
+                    _removed = int((_mask.view(_total_ch, -1).sum(dim=1) == 0).sum().item())
+                else:
+                    _removed = 0
+                block_removed_channels[_bn] = _removed
+        MIN_KEEP_RATIO = 0.10
+
+        # ── Uniform 분배: block_name별 그룹핑 및 활성 가중치 비례 분배 ──
+        layer_channels = defaultdict(list)
+        for score, block_name, channel_k, weight_count in score_by_channel:
+            layer_channels[block_name].append((score, channel_k, weight_count))
+
+        layer_active_weights = {bn: sum(w for _, _, w in chans) for bn, chans in layer_channels.items()}
+        layer_remove_targets = {}
+        if remove_target > 0 and active_channel_weights > 0:
+            for bn, aw in layer_active_weights.items():
+                layer_remove_targets[bn] = int(round(remove_target * aw / active_channel_weights))
+            # 반올림 오차 조정: 가장 큰 레이어에서 차이 보정
+            total_assigned = sum(layer_remove_targets.values())
+            diff = remove_target - total_assigned
+            if diff != 0:
+                largest_bn = max(layer_active_weights, key=layer_active_weights.get)
+                layer_remove_targets[largest_bn] += diff
+        else:
+            layer_remove_targets = {bn: 0 for bn in layer_channels}
+
         selected_channels = []
         accum_removed = 0
 
         if remove_target > 0:
-            for score, block_name, channel_k, weight_count in score_by_channel:
-                new_accum = accum_removed + weight_count
-                if abs(new_accum - remove_target) <= abs(accum_removed - remove_target):
-                    selected_channels.append((block_name, channel_k))
-                    accum_removed = new_accum
-                    if accum_removed >= remove_target:
+            for bn in sorted(layer_channels.keys(), key=lambda x: int(x.split('.')[1])):
+                layer_target = layer_remove_targets.get(bn, 0)
+                if layer_target <= 0:
+                    continue
+
+                sorted_chans = sorted(layer_channels[bn], key=lambda x: x[0])
+                _total_ch = block_total_channels.get(bn, 0)
+                _already_removed = block_removed_channels.get(bn, 0)
+                _removed_this_layer = 0
+                layer_accum = 0
+
+                for score, channel_k, weight_count in sorted_chans:
+                    # 최소 10% 잔존 보호: 제거 후 잔존 채널이 10% 미만이면 스킵
+                    if _total_ch > 0:
+                        if _total_ch - _already_removed - _removed_this_layer - 1 < int(_total_ch * MIN_KEEP_RATIO):
+                            break
+                    if layer_accum >= layer_target:
                         break
-                else:
-                    break
+                    selected_channels.append((bn, channel_k))
+                    _removed_this_layer += 1
+                    layer_accum += weight_count
+                    accum_removed += weight_count
+
+                print(
+                    f"  [Uniform 분배] layer={bn}, active_ch={len(sorted_chans)}, "
+                    f"layer_target={layer_target}, selected={_removed_this_layer}"
+                )
 
         print(
             f"impt_type == 2 채널 선택 완료: selected={len(selected_channels)}, "
             f"estimated_removed={accum_removed}, remove_target={remove_target}"
         )
 
-        # 로그 저장
+        # ── 채널 마스크 생성 (features.1~18) ──
+        channel_mask_list = _build_channel_mask_list(model, selected_channels, device)
+
+        # ── weight-level 마스크 (features.0.0, classifier.1) ──
+        # 채널 마스크 리스트를 layer 순서대로 dict로 변환
+        layer_order = [name for name, layer in model.named_modules()
+                       if type(layer).__name__ in supported_layers and hasattr(layer, 'weight')]
+        mask_by_name = dict(zip(layer_order, channel_mask_list))
+
+        weight_level_targets = ['features.0.0', 'classifier.1']
+        print(f"[weight-level 진단] importance_score_all 보유 키 수: {len(importance_score_all)}")
+        for wname in weight_level_targets:
+            if wname not in importance_score_all:
+                print(f"  [경고] '{wname}' 키가 importance_score_all에 없음 → weight-level pruning 건너뜀")
+                continue
+            print(f"  [확인] '{wname}' 키 존재, shape={importance_score_all[wname].shape}")
+            perf_w = importance_score_all[wname].to(torch.float32)
+            phi_w = phi_weight_by_layer.get(wname)
+
+            if phi_w is not None and perf_w.shape == phi_w.shape:
+                perf_w_scaled = scale_score_tensor(perf_w)
+                phi_w_scaled = scale_score_tensor(phi_w.to(torch.float32))
+                weight_score = (alpha * perf_w_scaled) - ((1.0 - alpha) * phi_w_scaled)
+            else:
+                # phi 없으면 성능 기여도만 사용
+                weight_score = scale_score_tensor(perf_w)
+
+            # ── 증분 방식: 현재 활성 weight 중에서만 추가 제거 ──
+            # AND 재선택 방식은 iter마다 score 랭킹 변화로 인해 zeros가 over-accumulate됨.
+            # 대신 "현재 활성 weight → 목표치에 맞게 추가 제거"로 정확히 keep_ratio 유지.
+            existing_mask = mask_by_name.get(wname, torch.ones_like(weight_score, dtype=torch.long).to(device))
+            N = existing_mask.numel()
+            target_kept = max(int(N * keep_ratio), 1)
+            current_kept = int(existing_mask.sum().item())
+            new_remove = current_kept - target_kept
+
+            if new_remove <= 0:
+                # 이미 목표 이상 제거됨 → 변경 없음
+                mask_by_name[wname] = existing_mask
+            else:
+                # 활성 weight 중 score가 낮은 순으로 new_remove개만 추가 zeroing
+                masked_score = weight_score.clone().float().to(device)
+                masked_score[existing_mask == 0] = float('inf')  # 이미 zeroed → 재선택 방지
+                flat_score = masked_score.flatten().cpu()
+                _, bottom_idx = torch.topk(flat_score, new_remove, largest=False)
+                new_mask = existing_mask.clone()
+                new_mask.flatten()[bottom_idx] = 0
+                mask_by_name[wname] = new_mask
+
+            kept = int(mask_by_name[wname].sum().item())
+            total = mask_by_name[wname].numel()
+            print(f"  weight mask [{wname}]: keep={kept}/{total} ({kept/max(total,1):.4f}), new_remove={max(new_remove,0)}")
+
+        # 로그 저장 (mask_by_name 완성 후 → weight-level 마스크를 정확히 반영)
         import config as _config
         score_by_channel_dict = {
             (b, k): (s, w)
@@ -1746,10 +2077,14 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             remove_target=remove_target,
             prune_iter=_config.glo_prune_iter,
             alpha=alpha,
+            model=model,
             log_dir='/workspace/FairGRAPE/FairGRAPE/channel_pruning_logs',
+            weight_masks_override=mask_by_name,
         )
 
-        return _build_channel_mask_list(model, selected_channels, device)
+        # 최종 마스크 리스트 반환 (layer 순서 유지)
+        final_mask_list = [mask_by_name[name].to(device) for name in layer_order if name in mask_by_name]
+        return final_mask_list
 
     raise ValueError(f"지원하지 않는 impt_type 입니다: {impt_type}")
 
