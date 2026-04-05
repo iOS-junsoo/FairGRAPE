@@ -464,12 +464,27 @@ def experiment(args):
             mean_ba = np.mean(all_ba_means)
             mean_eo = np.mean(all_eos)
             
+            # Attractive 클래스 개별 메트릭
+            attractive_idx = None
+            for _ti, _cn in enumerate(col_used_training):
+                if str(_cn) == 'Attractive':
+                    attractive_idx = _ti
+                    break
+            attractive_acc = None
+            attractive_eo = None
+            if attractive_idx is not None:
+                attractive_acc = float(running_corrects[attractive_idx]) / len(dataloaders['test'].dataset)
+                attractive_eo = all_eos[attractive_idx]
+
             # 2. 결과 출력 및 저장
             print(f"\n📊 Prune Iteration {i+1} 성능:")
             print(f"  Accuracy: {epoch_acc:.4f}")
             print(f"  Loss:     {epoch_loss:.4f}")
             print(f"  BA:       {mean_ba:.4f}")
             print(f"  EO:       {mean_eo:.4f}")
+            if attractive_acc is not None:
+                print(f"  Attractive Acc: {attractive_acc:.4f}")
+                print(f"  Attractive EO:  {attractive_eo:.4f}")
             
             # 3. 결과 파일 저장
             save_dir = 'no_retrain_results'
@@ -494,6 +509,9 @@ def experiment(args):
                 f.write(f"Loss:      {epoch_loss:.4f}\n")
                 f.write(f"BA:        {mean_ba:.4f}\n")
                 f.write(f"EO:        {mean_eo:.4f}\n")
+                if attractive_acc is not None:
+                    f.write(f"\nAttractive Acc: {attractive_acc:.4f}\n")
+                    f.write(f"Attractive EO:  {attractive_eo:.4f}\n")
                 f.write("-"*80 + "\n\n")
                 
                 # 세부 결과도 저장

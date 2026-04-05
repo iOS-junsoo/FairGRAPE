@@ -205,6 +205,15 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     best_eo = float('inf')
     best_ba = 0.0
 
+    # Attractive 클래스 개별 추적
+    attractive_idx = None
+    for _ti, _cn in enumerate(col_used_training):
+        if str(_cn) == 'Attractive':
+            attractive_idx = _ti
+            break
+    best_attractive_acc = 0.0
+    best_attractive_eo = float('inf')
+
     epoch_logs = []
     import sys
     from io import StringIO
@@ -416,6 +425,15 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             if len(all_eos) > 0:
                 mean_eo = np.mean(all_eos)
                 print(f"전체 클래스 평균 EO: {mean_eo:.4f}")
+
+            # Attractive 클래스 개별 메트릭
+            attractive_acc_epoch = None
+            attractive_eo_epoch = None
+            if attractive_idx is not None:
+                attractive_acc_epoch = float(running_corrects[attractive_idx]) / len(dataloaders[phase].dataset)
+                attractive_eo_epoch = all_eos[attractive_idx]
+                print(f"Attractive Acc: {attractive_acc_epoch:.4f}")
+                print(f"Attractive EO:  {attractive_eo_epoch:.4f}")
             print("="*50)
 
             # 2. 세부 결과 출력
@@ -497,6 +515,9 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     best_loss = epoch_loss
                     best_eo = mean_eo
                     best_ba = mean_ba
+                    if attractive_acc_epoch is not None:
+                        best_attractive_acc = attractive_acc_epoch
+                        best_attractive_eo = attractive_eo_epoch
                     best_model_wts = copy.deepcopy(training_model.state_dict())
                     best_optimizer_state = copy.deepcopy(optimizer.state_dict())
                     print(f"\n✅ Best 모델 갱신: {reason}")
@@ -579,6 +600,10 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         f.write(f"Best EO:        {best_eo:.4f}\n")
         f.write(f"Best Loss:      {best_loss:.4f}\n")
         f.write(f"Best BA:        {best_ba:.4f}\n")
+        if attractive_idx is not None:
+            f.write(f"\n")
+            f.write(f"Attractive Acc: {best_attractive_acc:.4f}\n")
+            f.write(f"Attractive EO:  {best_attractive_eo:.4f}\n")
         f.write("-"*80 + "\n\n")
     
     print(f"\n🏆 [베스트 모델 요약 저장] {best_model_path}")
