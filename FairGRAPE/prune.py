@@ -29,9 +29,10 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.0
+IMPT_TYPE2_ALPHA = 0.5
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 IMPT2_KEEP_PER_ITER = 0.9  # impt_type=2: 매 iteration마다 유지할 채널 가중치 비율
+IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.1  # impt_type=2: 각 레이어가 원본 채널의 최소 10%는 유지
 
 
 forward_mapping_dict = {
@@ -1898,17 +1899,62 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             f"candidates={len(score_by_channel)}"
         )
 
-        # ── 전역(global) 점수 기반 채널 선택: 점수 낮은 순으로 remove_target만큼 선택 ──
+        # ── 레이어별 최소 유지량 계산 (원본 채널 × IMPT2_MIN_KEEP_RATIO_PER_LAYER) ──
+        import math as _math
+        modules = dict(model.named_modules())
+        per_layer_original_ch = {}            # block_name -> 원본 채널 수
+        per_layer_already_removed = defaultdict(int)  # block_name -> 이미 완전 제거된 채널 수
+        for block_num in range(1, 18):
+            bn = f'features.{block_num}'
+            conv0_name, _, _ = _get_impt_type2_block_layer_names(bn)
+            if conv0_name in modules and hasattr(modules[conv0_name], 'weight'):
+                w = modules[conv0_name].weight
+                total_ch = int(w.shape[0])
+                per_layer_original_ch[bn] = total_ch
+                if hasattr(modules[conv0_name], 'mask') and modules[conv0_name].mask.shape == w.shape:
+                    mask = modules[conv0_name].mask
+                    per_layer_already_removed[bn] = int(
+                        (mask.view(total_ch, -1).sum(dim=1) == 0).sum().item()
+                    )
+
+        per_layer_min_keep = {
+            bn: int(_math.ceil(total_ch * IMPT2_MIN_KEEP_RATIO_PER_LAYER))
+            for bn, total_ch in per_layer_original_ch.items()
+        }
+
+        # ── 전역(global) 점수 기반 채널 선택 (레이어별 최소 유지 제약 반영) ──
         selected_channels = []
         accum_removed = 0
+        per_layer_select_count = defaultdict(int)
+        skipped_by_floor = defaultdict(int)
 
         if remove_target > 0:
             sorted_all = sorted(score_by_channel, key=lambda x: x[0])
             for score, block_name, channel_k, weight_count in sorted_all:
                 if accum_removed >= remove_target:
                     break
+
+                total_ch = per_layer_original_ch.get(block_name, 0)
+                min_keep = per_layer_min_keep.get(block_name, 0)
+                already_removed = per_layer_already_removed[block_name]
+                being_removed = per_layer_select_count[block_name]
+                remaining_after = total_ch - already_removed - being_removed - 1
+
+                if remaining_after < min_keep:
+                    # 이 채널을 제거하면 해당 레이어 최소 유지량 미만 → 스킵
+                    skipped_by_floor[block_name] += 1
+                    continue
+
                 selected_channels.append((block_name, channel_k))
                 accum_removed += weight_count
+                per_layer_select_count[block_name] += 1
+
+        # 제약으로 스킵된 레이어 로그
+        for bn in sorted(skipped_by_floor.keys(), key=lambda x: int(x.split('.')[1])):
+            print(
+                f"  [최소 유지 제약] layer={bn}, skipped={skipped_by_floor[bn]}, "
+                f"min_keep={per_layer_min_keep[bn]}/{per_layer_original_ch[bn]}"
+            )
 
         # 레이어별 선택 현황 출력
         layer_select_count = defaultdict(int)
