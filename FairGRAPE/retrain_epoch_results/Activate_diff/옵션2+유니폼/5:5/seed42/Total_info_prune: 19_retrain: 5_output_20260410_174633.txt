@@ -1,0 +1,558 @@
+
+📊 Loss 분석 (test):
+  Total Loss:  0.2585
+==================================================
+전체 성능 요약
+==================================================
+전체 클래스 평균 정확도: 0.8858
+전체 클래스 평균 Balanced Accuracy: 0.6483
+전체 클래스 평균 EO: 0.1640
+Attractive Acc: 0.7774
+Attractive EO:  0.3516
+==================================================
+X5_o_Clock_Shadow (gender=0, class=0): 11808/11809 = 0.9999
+X5_o_Clock_Shadow (gender=0, class=1): 1/1 = 1.0000
+X5_o_Clock_Shadow (gender=1, class=0): 5812/6198 = 0.9377
+X5_o_Clock_Shadow (gender=1, class=1): 833/2252 = 0.3699
+X5_o_Clock_Shadow ⭐⭐⭐ Balanced Accuracy: 0.8269
+
+X5_o_Clock_Shadow TPR (gender=0): 1/1 = 1.0000
+X5_o_Clock_Shadow FPR (gender=0): 1/11809 = 0.0001
+X5_o_Clock_Shadow TPR (gender=1): 833/2252 = 0.3699
+X5_o_Clock_Shadow FPR (gender=1): 386/6198 = 0.0623
+X5_o_Clock_Shadow TPR gap: 0.6301
+X5_o_Clock_Shadow FPR gap: 0.0622
+X5_o_Clock_Shadow ⭐⭐⭐ EO: 0.3462
+--------------------------------------------------
+Arched_Eyebrows (gender=0, class=0): 5675/6856 = 0.8277
+Arched_Eyebrows (gender=0, class=1): 2643/4954 = 0.5335
+Arched_Eyebrows (gender=1, class=0): 7994/8017 = 0.9971
+Arched_Eyebrows (gender=1, class=1): 25/433 = 0.0577
+Arched_Eyebrows ⭐⭐⭐ Balanced Accuracy: 0.6040
+
+Arched_Eyebrows TPR (gender=0): 2643/4954 = 0.5335
+Arched_Eyebrows FPR (gender=0): 1181/6856 = 0.1723
+Arched_Eyebrows TPR (gender=1): 25/433 = 0.0577
+Arched_Eyebrows FPR (gender=1): 23/8017 = 0.0029
+Arched_Eyebrows TPR gap: 0.4758
+Arched_Eyebrows FPR gap: 0.1694
+Arched_Eyebrows ⭐⭐⭐ EO: 0.3226
+--------------------------------------------------
+Attractive (gender=0, class=0): 2230/3778 = 0.5903
+Attractive (gender=0, class=1): 6883/8032 = 0.8569
+Attractive (gender=1, class=0): 5511/6065 = 0.9087
+Attractive (gender=1, class=1): 1126/2385 = 0.4721
+Attractive ⭐⭐⭐ Balanced Accuracy: 0.7070
+
+Attractive TPR (gender=0): 6883/8032 = 0.8569
+Attractive FPR (gender=0): 1548/3778 = 0.4097
+Attractive TPR (gender=1): 1126/2385 = 0.4721
+Attractive FPR (gender=1): 554/6065 = 0.0913
+Attractive TPR gap: 0.3848
+Attractive FPR gap: 0.3184
+Attractive ⭐⭐⭐ EO: 0.3516
+--------------------------------------------------
+Bags_Under_Eyes (gender=0, class=0): 10380/10578 = 0.9813
+Bags_Under_Eyes (gender=0, class=1): 193/1232 = 0.1567
+Bags_Under_Eyes (gender=1, class=0): 4683/5458 = 0.8580
+Bags_Under_Eyes (gender=1, class=1): 1219/2992 = 0.4074
+Bags_Under_Eyes ⭐⭐⭐ Balanced Accuracy: 0.6008
+
+Bags_Under_Eyes TPR (gender=0): 193/1232 = 0.1567
+Bags_Under_Eyes FPR (gender=0): 198/10578 = 0.0187
+Bags_Under_Eyes TPR (gender=1): 1219/2992 = 0.4074
+Bags_Under_Eyes FPR (gender=1): 775/5458 = 0.1420
+Bags_Under_Eyes TPR gap: 0.2508
+Bags_Under_Eyes FPR gap: 0.1233
+Bags_Under_Eyes ⭐⭐⭐ EO: 0.1870
+--------------------------------------------------
+Bald (gender=0, class=0): 11807/11807 = 1.0000
+Bald (gender=0, class=1): 0/3 = 0.0000
+Bald (gender=1, class=0): 7931/7998 = 0.9916
+Bald (gender=1, class=1): 134/452 = 0.2965
+Bald ⭐⭐⭐ Balanced Accuracy: 0.5720
+
+Bald TPR (gender=0): 0/3 = 0.0000
+Bald FPR (gender=0): 0/11807 = 0.0000
+Bald TPR (gender=1): 134/452 = 0.2965
+Bald FPR (gender=1): 67/7998 = 0.0084
+Bald TPR gap: 0.2965
+Bald FPR gap: 0.0084
+Bald ⭐⭐⭐ EO: 0.1524
+--------------------------------------------------
+Bangs (gender=0, class=0): 9036/9376 = 0.9637
+Bangs (gender=0, class=1): 1876/2434 = 0.7707
+Bangs (gender=1, class=0): 7633/7767 = 0.9827
+Bangs (gender=1, class=1): 470/683 = 0.6881
+Bangs ⭐⭐⭐ Balanced Accuracy: 0.8513
+
+Bangs TPR (gender=0): 1876/2434 = 0.7707
+Bangs FPR (gender=0): 340/9376 = 0.0363
+Bangs TPR (gender=1): 470/683 = 0.6881
+Bangs FPR (gender=1): 134/7767 = 0.0173
+Bangs TPR gap: 0.0826
+Bangs FPR gap: 0.0190
+Bangs ⭐⭐⭐ EO: 0.0508
+--------------------------------------------------
+Big_Lips (gender=0, class=0): 7593/8232 = 0.9224
+Big_Lips (gender=0, class=1): 602/3578 = 0.1683
+Big_Lips (gender=1, class=0): 7064/7177 = 0.9843
+Big_Lips (gender=1, class=1): 319/1273 = 0.2506
+Big_Lips ⭐⭐⭐ Balanced Accuracy: 0.5814
+
+Big_Lips TPR (gender=0): 602/3578 = 0.1683
+Big_Lips FPR (gender=0): 639/8232 = 0.0776
+Big_Lips TPR (gender=1): 319/1273 = 0.2506
+Big_Lips FPR (gender=1): 113/7177 = 0.0157
+Big_Lips TPR gap: 0.0823
+Big_Lips FPR gap: 0.0619
+Big_Lips ⭐⭐⭐ EO: 0.0721
+--------------------------------------------------
+Big_Nose (gender=0, class=0): 10457/10550 = 0.9912
+Big_Nose (gender=0, class=1): 114/1260 = 0.0905
+Big_Nose (gender=1, class=0): 4390/4936 = 0.8894
+Big_Nose (gender=1, class=1): 1303/3514 = 0.3708
+Big_Nose ⭐⭐⭐ Balanced Accuracy: 0.5855
+
+Big_Nose TPR (gender=0): 114/1260 = 0.0905
+Big_Nose FPR (gender=0): 93/10550 = 0.0088
+Big_Nose TPR (gender=1): 1303/3514 = 0.3708
+Big_Nose FPR (gender=1): 546/4936 = 0.1106
+Big_Nose TPR gap: 0.2803
+Big_Nose FPR gap: 0.1018
+Big_Nose ⭐⭐⭐ EO: 0.1911
+--------------------------------------------------
+Black_Hair (gender=0, class=0): 8847/9469 = 0.9343
+Black_Hair (gender=0, class=1): 1157/2341 = 0.4942
+Black_Hair (gender=1, class=0): 5246/5956 = 0.8808
+Black_Hair (gender=1, class=1): 1614/2494 = 0.6472
+Black_Hair ⭐⭐⭐ Balanced Accuracy: 0.7391
+
+Black_Hair TPR (gender=0): 1157/2341 = 0.4942
+Black_Hair FPR (gender=0): 622/9469 = 0.0657
+Black_Hair TPR (gender=1): 1614/2494 = 0.6472
+Black_Hair FPR (gender=1): 710/5956 = 0.1192
+Black_Hair TPR gap: 0.1529
+Black_Hair FPR gap: 0.0535
+Black_Hair ⭐⭐⭐ EO: 0.1032
+--------------------------------------------------
+Blond_Hair (gender=0, class=0): 8428/9001 = 0.9363
+Blond_Hair (gender=0, class=1): 2193/2809 = 0.7807
+Blond_Hair (gender=1, class=0): 8242/8263 = 0.9975
+Blond_Hair (gender=1, class=1): 25/187 = 0.1337
+Blond_Hair ⭐⭐⭐ Balanced Accuracy: 0.7120
+
+Blond_Hair TPR (gender=0): 2193/2809 = 0.7807
+Blond_Hair FPR (gender=0): 573/9001 = 0.0637
+Blond_Hair TPR (gender=1): 25/187 = 0.1337
+Blond_Hair FPR (gender=1): 21/8263 = 0.0025
+Blond_Hair TPR gap: 0.6470
+Blond_Hair FPR gap: 0.0611
+Blond_Hair ⭐⭐⭐ EO: 0.3541
+--------------------------------------------------
+Blurry (gender=0, class=0): 11249/11249 = 1.0000
+Blurry (gender=0, class=1): 0/561 = 0.0000
+Blurry (gender=1, class=0): 7942/7942 = 1.0000
+Blurry (gender=1, class=1): 0/508 = 0.0000
+Blurry ⭐⭐⭐ Balanced Accuracy: 0.5000
+
+Blurry TPR (gender=0): 0/561 = 0.0000
+Blurry FPR (gender=0): 0/11249 = 0.0000
+Blurry TPR (gender=1): 0/508 = 0.0000
+Blurry FPR (gender=1): 0/7942 = 0.0000
+Blurry TPR gap: 0.0000
+Blurry FPR gap: 0.0000
+Blurry ⭐⭐⭐ EO: 0.0000
+--------------------------------------------------
+Brown_Hair (gender=0, class=0): 8527/8887 = 0.9595
+Brown_Hair (gender=0, class=1): 612/2923 = 0.2094
+Brown_Hair (gender=1, class=0): 7096/7161 = 0.9909
+Brown_Hair (gender=1, class=1): 135/1289 = 0.1047
+Brown_Hair ⭐⭐⭐ Balanced Accuracy: 0.5661
+
+Brown_Hair TPR (gender=0): 612/2923 = 0.2094
+Brown_Hair FPR (gender=0): 360/8887 = 0.0405
+Brown_Hair TPR (gender=1): 135/1289 = 0.1047
+Brown_Hair FPR (gender=1): 65/7161 = 0.0091
+Brown_Hair TPR gap: 0.1046
+Brown_Hair FPR gap: 0.0314
+Brown_Hair ⭐⭐⭐ EO: 0.0680
+--------------------------------------------------
+Bushy_Eyebrows (gender=0, class=0): 10967/11029 = 0.9944
+Bushy_Eyebrows (gender=0, class=1): 55/781 = 0.0704
+Bushy_Eyebrows (gender=1, class=0): 6150/6428 = 0.9568
+Bushy_Eyebrows (gender=1, class=1): 798/2022 = 0.3947
+Bushy_Eyebrows ⭐⭐⭐ Balanced Accuracy: 0.6041
+
+Bushy_Eyebrows TPR (gender=0): 55/781 = 0.0704
+Bushy_Eyebrows FPR (gender=0): 62/11029 = 0.0056
+Bushy_Eyebrows TPR (gender=1): 798/2022 = 0.3947
+Bushy_Eyebrows FPR (gender=1): 278/6428 = 0.0432
+Bushy_Eyebrows TPR gap: 0.3242
+Bushy_Eyebrows FPR gap: 0.0376
+Bushy_Eyebrows ⭐⭐⭐ EO: 0.1809
+--------------------------------------------------
+Chubby (gender=0, class=0): 11660/11663 = 0.9997
+Chubby (gender=0, class=1): 2/147 = 0.0136
+Chubby (gender=1, class=0): 7394/7468 = 0.9901
+Chubby (gender=1, class=1): 142/982 = 0.1446
+Chubby ⭐⭐⭐ Balanced Accuracy: 0.5370
+
+Chubby TPR (gender=0): 2/147 = 0.0136
+Chubby FPR (gender=0): 3/11663 = 0.0003
+Chubby TPR (gender=1): 142/982 = 0.1446
+Chubby FPR (gender=1): 74/7468 = 0.0099
+Chubby TPR gap: 0.1310
+Chubby FPR gap: 0.0097
+Chubby ⭐⭐⭐ EO: 0.0703
+--------------------------------------------------
+Double_Chin (gender=0, class=0): 11700/11703 = 0.9997
+Double_Chin (gender=0, class=1): 3/107 = 0.0280
+Double_Chin (gender=1, class=0): 7539/7624 = 0.9889
+Double_Chin (gender=1, class=1): 156/826 = 0.1889
+Double_Chin ⭐⭐⭐ Balanced Accuracy: 0.5514
+
+Double_Chin TPR (gender=0): 3/107 = 0.0280
+Double_Chin FPR (gender=0): 3/11703 = 0.0003
+Double_Chin TPR (gender=1): 156/826 = 0.1889
+Double_Chin FPR (gender=1): 85/7624 = 0.0111
+Double_Chin TPR gap: 0.1608
+Double_Chin FPR gap: 0.0109
+Double_Chin ⭐⭐⭐ EO: 0.0859
+--------------------------------------------------
+Eyeglasses (gender=0, class=0): 11487/11521 = 0.9970
+Eyeglasses (gender=0, class=1): 224/289 = 0.7751
+Eyeglasses (gender=1, class=0): 7343/7428 = 0.9886
+Eyeglasses (gender=1, class=1): 773/1022 = 0.7564
+Eyeglasses ⭐⭐⭐ Balanced Accuracy: 0.8793
+
+Eyeglasses TPR (gender=0): 224/289 = 0.7751
+Eyeglasses FPR (gender=0): 34/11521 = 0.0030
+Eyeglasses TPR (gender=1): 773/1022 = 0.7564
+Eyeglasses FPR (gender=1): 85/7428 = 0.0114
+Eyeglasses TPR gap: 0.0187
+Eyeglasses FPR gap: 0.0085
+Eyeglasses ⭐⭐⭐ EO: 0.0136
+--------------------------------------------------
+Goatee (gender=0, class=0): 11807/11809 = 0.9998
+Goatee (gender=0, class=1): 0/1 = 0.0000
+Goatee (gender=1, class=0): 7006/7196 = 0.9736
+Goatee (gender=1, class=1): 451/1254 = 0.3596
+Goatee ⭐⭐⭐ Balanced Accuracy: 0.5833
+
+Goatee TPR (gender=0): 0/1 = 0.0000
+Goatee FPR (gender=0): 2/11809 = 0.0002
+Goatee TPR (gender=1): 451/1254 = 0.3596
+Goatee FPR (gender=1): 190/7196 = 0.0264
+Goatee TPR gap: 0.3596
+Goatee FPR gap: 0.0262
+Goatee ⭐⭐⭐ EO: 0.1929
+--------------------------------------------------
+Gray_Hair (gender=0, class=0): 11672/11700 = 0.9976
+Gray_Hair (gender=0, class=1): 38/110 = 0.3455
+Gray_Hair (gender=1, class=0): 7537/7666 = 0.9832
+Gray_Hair (gender=1, class=1): 392/784 = 0.5000
+Gray_Hair ⭐⭐⭐ Balanced Accuracy: 0.7066
+
+Gray_Hair TPR (gender=0): 38/110 = 0.3455
+Gray_Hair FPR (gender=0): 28/11700 = 0.0024
+Gray_Hair TPR (gender=1): 392/784 = 0.5000
+Gray_Hair FPR (gender=1): 129/7666 = 0.0168
+Gray_Hair TPR gap: 0.1545
+Gray_Hair FPR gap: 0.0144
+Gray_Hair ⭐⭐⭐ EO: 0.0845
+--------------------------------------------------
+Heavy_Makeup (gender=0, class=0): 2831/4028 = 0.7028
+Heavy_Makeup (gender=0, class=1): 6615/7782 = 0.8500
+Heavy_Makeup (gender=1, class=0): 8372/8428 = 0.9934
+Heavy_Makeup (gender=1, class=1): 3/22 = 0.1364
+Heavy_Makeup ⭐⭐⭐ Balanced Accuracy: 0.6706
+
+Heavy_Makeup TPR (gender=0): 6615/7782 = 0.8500
+Heavy_Makeup FPR (gender=0): 1197/4028 = 0.2972
+Heavy_Makeup TPR (gender=1): 3/22 = 0.1364
+Heavy_Makeup FPR (gender=1): 56/8428 = 0.0066
+Heavy_Makeup TPR gap: 0.7137
+Heavy_Makeup FPR gap: 0.2905
+Heavy_Makeup ⭐⭐⭐ EO: 0.5021
+--------------------------------------------------
+High_Cheekbones (gender=0, class=0): 4460/5191 = 0.8592
+High_Cheekbones (gender=0, class=1): 5757/6619 = 0.8698
+High_Cheekbones (gender=1, class=0): 5477/5892 = 0.9296
+High_Cheekbones (gender=1, class=1): 1544/2558 = 0.6036
+High_Cheekbones ⭐⭐⭐ Balanced Accuracy: 0.8155
+
+High_Cheekbones TPR (gender=0): 5757/6619 = 0.8698
+High_Cheekbones FPR (gender=0): 731/5191 = 0.1408
+High_Cheekbones TPR (gender=1): 1544/2558 = 0.6036
+High_Cheekbones FPR (gender=1): 415/5892 = 0.0704
+High_Cheekbones TPR gap: 0.2662
+High_Cheekbones FPR gap: 0.0704
+High_Cheekbones ⭐⭐⭐ EO: 0.1683
+--------------------------------------------------
+Mouth_Slightly_Open (gender=0, class=0): 5124/5631 = 0.9100
+Mouth_Slightly_Open (gender=0, class=1): 5150/6179 = 0.8335
+Mouth_Slightly_Open (gender=1, class=0): 4489/4840 = 0.9275
+Mouth_Slightly_Open (gender=1, class=1): 2706/3610 = 0.7496
+Mouth_Slightly_Open ⭐⭐⭐ Balanced Accuracy: 0.8551
+
+Mouth_Slightly_Open TPR (gender=0): 5150/6179 = 0.8335
+Mouth_Slightly_Open FPR (gender=0): 507/5631 = 0.0900
+Mouth_Slightly_Open TPR (gender=1): 2706/3610 = 0.7496
+Mouth_Slightly_Open FPR (gender=1): 351/4840 = 0.0725
+Mouth_Slightly_Open TPR gap: 0.0839
+Mouth_Slightly_Open FPR gap: 0.0175
+Mouth_Slightly_Open ⭐⭐⭐ EO: 0.0507
+--------------------------------------------------
+Mustache (gender=0, class=0): 11810/11810 = 1.0000
+Mustache (gender=0, class=1): 0/0 = N/A
+Mustache (gender=1, class=0): 7588/7665 = 0.9900
+Mustache (gender=1, class=1): 94/785 = 0.1197
+Mustache ⭐⭐⭐ Balanced Accuracy: 0.5274
+
+Mustache TPR (gender=0): 0/0 = N/A
+Mustache FPR (gender=0): 0/11810 = 0.0000
+Mustache TPR (gender=1): 94/785 = 0.1197
+Mustache FPR (gender=1): 77/7665 = 0.0100
+Mustache TPR gap: 0.1197
+Mustache FPR gap: 0.0100
+Mustache ⭐⭐⭐ EO: 0.0649
+--------------------------------------------------
+Narrow_Eyes (gender=0, class=0): 10451/10505 = 0.9949
+Narrow_Eyes (gender=0, class=1): 95/1305 = 0.0728
+Narrow_Eyes (gender=1, class=0): 7357/7418 = 0.9918
+Narrow_Eyes (gender=1, class=1): 62/1032 = 0.0601
+Narrow_Eyes ⭐⭐⭐ Balanced Accuracy: 0.5299
+
+Narrow_Eyes TPR (gender=0): 95/1305 = 0.0728
+Narrow_Eyes FPR (gender=0): 54/10505 = 0.0051
+Narrow_Eyes TPR (gender=1): 62/1032 = 0.0601
+Narrow_Eyes FPR (gender=1): 61/7418 = 0.0082
+Narrow_Eyes TPR gap: 0.0127
+Narrow_Eyes FPR gap: 0.0031
+Narrow_Eyes ⭐⭐⭐ EO: 0.0079
+--------------------------------------------------
+No_Beard (gender=0, class=0): 1/9 = 0.1111
+No_Beard (gender=0, class=1): 11772/11801 = 0.9975
+No_Beard (gender=1, class=0): 2070/3293 = 0.6286
+No_Beard (gender=1, class=1): 4763/5157 = 0.9236
+No_Beard ⭐⭐⭐ Balanced Accuracy: 0.6652
+
+No_Beard TPR (gender=0): 11772/11801 = 0.9975
+No_Beard FPR (gender=0): 8/9 = 0.8889
+No_Beard TPR (gender=1): 4763/5157 = 0.9236
+No_Beard FPR (gender=1): 1223/3293 = 0.3714
+No_Beard TPR gap: 0.0739
+No_Beard FPR gap: 0.5175
+No_Beard ⭐⭐⭐ EO: 0.2957
+--------------------------------------------------
+Oval_Face (gender=0, class=0): 7279/7988 = 0.9112
+Oval_Face (gender=0, class=1): 1237/3822 = 0.3237
+Oval_Face (gender=1, class=0): 6525/6610 = 0.9871
+Oval_Face (gender=1, class=1): 96/1840 = 0.0522
+Oval_Face ⭐⭐⭐ Balanced Accuracy: 0.5686
+
+Oval_Face TPR (gender=0): 1237/3822 = 0.3237
+Oval_Face FPR (gender=0): 709/7988 = 0.0888
+Oval_Face TPR (gender=1): 96/1840 = 0.0522
+Oval_Face FPR (gender=1): 85/6610 = 0.0129
+Oval_Face TPR gap: 0.2715
+Oval_Face FPR gap: 0.0759
+Oval_Face ⭐⭐⭐ EO: 0.1737
+--------------------------------------------------
+Pale_Skin (gender=0, class=0): 11122/11136 = 0.9987
+Pale_Skin (gender=0, class=1): 24/674 = 0.0356
+Pale_Skin (gender=1, class=0): 8246/8247 = 0.9999
+Pale_Skin (gender=1, class=1): 2/203 = 0.0099
+Pale_Skin ⭐⭐⭐ Balanced Accuracy: 0.5110
+
+Pale_Skin TPR (gender=0): 24/674 = 0.0356
+Pale_Skin FPR (gender=0): 14/11136 = 0.0013
+Pale_Skin TPR (gender=1): 2/203 = 0.0099
+Pale_Skin FPR (gender=1): 1/8247 = 0.0001
+Pale_Skin TPR gap: 0.0258
+Pale_Skin FPR gap: 0.0011
+Pale_Skin ⭐⭐⭐ EO: 0.0134
+--------------------------------------------------
+Pointy_Nose (gender=0, class=0): 6808/7630 = 0.8923
+Pointy_Nose (gender=0, class=1): 1301/4180 = 0.3112
+Pointy_Nose (gender=1, class=0): 6960/7056 = 0.9864
+Pointy_Nose (gender=1, class=1): 84/1394 = 0.0603
+Pointy_Nose ⭐⭐⭐ Balanced Accuracy: 0.5625
+
+Pointy_Nose TPR (gender=0): 1301/4180 = 0.3112
+Pointy_Nose FPR (gender=0): 822/7630 = 0.1077
+Pointy_Nose TPR (gender=1): 84/1394 = 0.0603
+Pointy_Nose FPR (gender=1): 96/7056 = 0.0136
+Pointy_Nose TPR gap: 0.2510
+Pointy_Nose FPR gap: 0.0941
+Pointy_Nose ⭐⭐⭐ EO: 0.1726
+--------------------------------------------------
+Receding_Hairline (gender=0, class=0): 11149/11192 = 0.9962
+Receding_Hairline (gender=0, class=1): 82/618 = 0.1327
+Receding_Hairline (gender=1, class=0): 7180/7444 = 0.9645
+Receding_Hairline (gender=1, class=1): 373/1006 = 0.3708
+Receding_Hairline ⭐⭐⭐ Balanced Accuracy: 0.6160
+
+Receding_Hairline TPR (gender=0): 82/618 = 0.1327
+Receding_Hairline FPR (gender=0): 43/11192 = 0.0038
+Receding_Hairline TPR (gender=1): 373/1006 = 0.3708
+Receding_Hairline FPR (gender=1): 264/7444 = 0.0355
+Receding_Hairline TPR gap: 0.2381
+Receding_Hairline FPR gap: 0.0316
+Receding_Hairline ⭐⭐⭐ EO: 0.1349
+--------------------------------------------------
+Rosy_Cheeks (gender=0, class=0): 10368/10540 = 0.9837
+Rosy_Cheeks (gender=0, class=1): 229/1270 = 0.1803
+Rosy_Cheeks (gender=1, class=0): 8417/8417 = 1.0000
+Rosy_Cheeks (gender=1, class=1): 0/33 = 0.0000
+Rosy_Cheeks ⭐⭐⭐ Balanced Accuracy: 0.5410
+
+Rosy_Cheeks TPR (gender=0): 229/1270 = 0.1803
+Rosy_Cheeks FPR (gender=0): 172/10540 = 0.0163
+Rosy_Cheeks TPR (gender=1): 0/33 = 0.0000
+Rosy_Cheeks FPR (gender=1): 0/8417 = 0.0000
+Rosy_Cheeks TPR gap: 0.1803
+Rosy_Cheeks FPR gap: 0.0163
+Rosy_Cheeks ⭐⭐⭐ EO: 0.0983
+--------------------------------------------------
+Sideburns (gender=0, class=0): 11808/11808 = 1.0000
+Sideburns (gender=0, class=1): 0/2 = 0.0000
+Sideburns (gender=1, class=0): 7118/7297 = 0.9755
+Sideburns (gender=1, class=1): 499/1153 = 0.4328
+Sideburns ⭐⭐⭐ Balanced Accuracy: 0.6021
+
+Sideburns TPR (gender=0): 0/2 = 0.0000
+Sideburns FPR (gender=0): 0/11808 = 0.0000
+Sideburns TPR (gender=1): 499/1153 = 0.4328
+Sideburns FPR (gender=1): 179/7297 = 0.0245
+Sideburns TPR gap: 0.4328
+Sideburns FPR gap: 0.0245
+Sideburns ⭐⭐⭐ EO: 0.2287
+--------------------------------------------------
+Smiling (gender=0, class=0): 4956/5401 = 0.9176
+Smiling (gender=0, class=1): 5797/6409 = 0.9045
+Smiling (gender=1, class=0): 4896/5085 = 0.9628
+Smiling (gender=1, class=1): 2595/3365 = 0.7712
+Smiling ⭐⭐⭐ Balanced Accuracy: 0.8890
+
+Smiling TPR (gender=0): 5797/6409 = 0.9045
+Smiling FPR (gender=0): 445/5401 = 0.0824
+Smiling TPR (gender=1): 2595/3365 = 0.7712
+Smiling FPR (gender=1): 189/5085 = 0.0372
+Smiling TPR gap: 0.1333
+Smiling FPR gap: 0.0452
+Smiling ⭐⭐⭐ EO: 0.0893
+--------------------------------------------------
+Straight_Hair (gender=0, class=0): 9371/9666 = 0.9695
+Straight_Hair (gender=0, class=1): 409/2144 = 0.1908
+Straight_Hair (gender=1, class=0): 5757/6336 = 0.9086
+Straight_Hair (gender=1, class=1): 697/2114 = 0.3297
+Straight_Hair ⭐⭐⭐ Balanced Accuracy: 0.5996
+
+Straight_Hair TPR (gender=0): 409/2144 = 0.1908
+Straight_Hair FPR (gender=0): 295/9666 = 0.0305
+Straight_Hair TPR (gender=1): 697/2114 = 0.3297
+Straight_Hair FPR (gender=1): 579/6336 = 0.0914
+Straight_Hair TPR gap: 0.1389
+Straight_Hair FPR gap: 0.0609
+Straight_Hair ⭐⭐⭐ EO: 0.0999
+--------------------------------------------------
+Wavy_Hair (gender=0, class=0): 4976/6598 = 0.7542
+Wavy_Hair (gender=0, class=1): 3825/5212 = 0.7339
+Wavy_Hair (gender=1, class=0): 7043/7267 = 0.9692
+Wavy_Hair (gender=1, class=1): 343/1183 = 0.2899
+Wavy_Hair ⭐⭐⭐ Balanced Accuracy: 0.6868
+
+Wavy_Hair TPR (gender=0): 3825/5212 = 0.7339
+Wavy_Hair FPR (gender=0): 1622/6598 = 0.2458
+Wavy_Hair TPR (gender=1): 343/1183 = 0.2899
+Wavy_Hair FPR (gender=1): 224/7267 = 0.0308
+Wavy_Hair TPR gap: 0.4439
+Wavy_Hair FPR gap: 0.2150
+Wavy_Hair ⭐⭐⭐ EO: 0.3295
+--------------------------------------------------
+Wearing_Earrings (gender=0, class=0): 7707/8167 = 0.9437
+Wearing_Earrings (gender=0, class=1): 1100/3643 = 0.3019
+Wearing_Earrings (gender=1, class=0): 8317/8325 = 0.9990
+Wearing_Earrings (gender=1, class=1): 3/125 = 0.0240
+Wearing_Earrings ⭐⭐⭐ Balanced Accuracy: 0.5672
+
+Wearing_Earrings TPR (gender=0): 1100/3643 = 0.3019
+Wearing_Earrings FPR (gender=0): 460/8167 = 0.0563
+Wearing_Earrings TPR (gender=1): 3/125 = 0.0240
+Wearing_Earrings FPR (gender=1): 8/8325 = 0.0010
+Wearing_Earrings TPR gap: 0.2779
+Wearing_Earrings FPR gap: 0.0554
+Wearing_Earrings ⭐⭐⭐ EO: 0.1667
+--------------------------------------------------
+Wearing_Hat (gender=0, class=0): 11466/11500 = 0.9970
+Wearing_Hat (gender=0, class=1): 181/310 = 0.5839
+Wearing_Hat (gender=1, class=0): 7713/7780 = 0.9914
+Wearing_Hat (gender=1, class=1): 452/670 = 0.6746
+Wearing_Hat ⭐⭐⭐ Balanced Accuracy: 0.8117
+
+Wearing_Hat TPR (gender=0): 181/310 = 0.5839
+Wearing_Hat FPR (gender=0): 34/11500 = 0.0030
+Wearing_Hat TPR (gender=1): 452/670 = 0.6746
+Wearing_Hat FPR (gender=1): 67/7780 = 0.0086
+Wearing_Hat TPR gap: 0.0908
+Wearing_Hat FPR gap: 0.0057
+Wearing_Hat ⭐⭐⭐ EO: 0.0482
+--------------------------------------------------
+Wearing_Lipstick (gender=0, class=0): 1314/2276 = 0.5773
+Wearing_Lipstick (gender=0, class=1): 8790/9534 = 0.9220
+Wearing_Lipstick (gender=1, class=0): 8218/8397 = 0.9787
+Wearing_Lipstick (gender=1, class=1): 22/53 = 0.4151
+Wearing_Lipstick ⭐⭐⭐ Balanced Accuracy: 0.7233
+
+Wearing_Lipstick TPR (gender=0): 8790/9534 = 0.9220
+Wearing_Lipstick FPR (gender=0): 962/2276 = 0.4227
+Wearing_Lipstick TPR (gender=1): 22/53 = 0.4151
+Wearing_Lipstick FPR (gender=1): 179/8397 = 0.0213
+Wearing_Lipstick TPR gap: 0.5069
+Wearing_Lipstick FPR gap: 0.4014
+Wearing_Lipstick ⭐⭐⭐ EO: 0.4541
+--------------------------------------------------
+Wearing_Necklace (gender=0, class=0): 9436/9480 = 0.9954
+Wearing_Necklace (gender=0, class=1): 41/2330 = 0.0176
+Wearing_Necklace (gender=1, class=0): 8315/8315 = 1.0000
+Wearing_Necklace (gender=1, class=1): 0/135 = 0.0000
+Wearing_Necklace ⭐⭐⭐ Balanced Accuracy: 0.5032
+
+Wearing_Necklace TPR (gender=0): 41/2330 = 0.0176
+Wearing_Necklace FPR (gender=0): 44/9480 = 0.0046
+Wearing_Necklace TPR (gender=1): 0/135 = 0.0000
+Wearing_Necklace FPR (gender=1): 0/8315 = 0.0000
+Wearing_Necklace TPR gap: 0.0176
+Wearing_Necklace FPR gap: 0.0046
+Wearing_Necklace ⭐⭐⭐ EO: 0.0111
+--------------------------------------------------
+Wearing_Necktie (gender=0, class=0): 11797/11807 = 0.9992
+Wearing_Necktie (gender=0, class=1): 0/3 = 0.0000
+Wearing_Necktie (gender=1, class=0): 6581/6995 = 0.9408
+Wearing_Necktie (gender=1, class=1): 710/1455 = 0.4880
+Wearing_Necktie ⭐⭐⭐ Balanced Accuracy: 0.6070
+
+Wearing_Necktie TPR (gender=0): 0/3 = 0.0000
+Wearing_Necktie FPR (gender=0): 10/11807 = 0.0008
+Wearing_Necktie TPR (gender=1): 710/1455 = 0.4880
+Wearing_Necktie FPR (gender=1): 414/6995 = 0.0592
+Wearing_Necktie TPR gap: 0.4880
+Wearing_Necktie FPR gap: 0.0583
+Wearing_Necktie ⭐⭐⭐ EO: 0.2732
+--------------------------------------------------
+Young (gender=0, class=0): 579/1429 = 0.4052
+Young (gender=0, class=1): 9905/10381 = 0.9541
+Young (gender=1, class=0): 2084/3072 = 0.6784
+Young (gender=1, class=1): 4621/5378 = 0.8592
+Young ⭐⭐⭐ Balanced Accuracy: 0.7242
+
+Young TPR (gender=0): 9905/10381 = 0.9541
+Young FPR (gender=0): 850/1429 = 0.5948
+Young TPR (gender=1): 4621/5378 = 0.8592
+Young FPR (gender=1): 988/3072 = 0.3216
+Young TPR gap: 0.0949
+Young FPR gap: 0.2732
+Young ⭐⭐⭐ EO: 0.1841
+--------------------------------------------------
