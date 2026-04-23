@@ -29,7 +29,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.5
+IMPT_TYPE2_ALPHA = 0.9
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 IMPT2_KEEP_PER_ITER = 0.9  # impt_type=2: 매 iteration마다 유지할 채널 가중치 비율
 IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.1  # impt_type=2: 각 레이어가 원본 채널의 최소 10%는 유지
