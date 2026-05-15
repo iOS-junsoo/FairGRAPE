@@ -10,9 +10,6 @@ import numpy as np
 from util import make_model, save_model, save_output, download_dataset, show_acc_df, setseed, save_unpruned_model, print_acc_scores
 
 
-# Best 모델 선정: peak_acc - ε 범위 내 epoch 중 EO 최소를 선택
-BEST_MODEL_ACC_EPSILON = 0.005
-
 
 ############################################################################
 # train 함수: 여러 학습률과 에폭 설정으로 모델을 반복 학습하여, 
@@ -207,9 +204,6 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     best_loss = 100
     best_eo = float('inf')
     best_ba = 0.0
-
-    # Option B: 전 epoch 결과를 모은 뒤 한 번에 best 선정
-    epoch_results = []
 
     # Attractive 클래스 개별 추적
     attractive_idx = None
@@ -500,20 +494,38 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             output_text = output_capture.getvalue()
             output_capture.close()
 
-            # 🔥 Option B: epoch 결과 수집 (루프 후 한 번에 best 선정)
+            # 🔥 Best 모델 갱신 (기존 로직 유지)
             if phase == 'test':
-                epoch_results.append({
-                    'epoch': epoch,
-                    'acc': epoch_acc,
-                    'loss': epoch_loss,
-                    'eo': mean_eo,
-                    'ba': mean_ba,
-                    'attractive_acc': attractive_acc_epoch,
-                    'attractive_eo': attractive_eo_epoch,
-                    'model_wts': copy.deepcopy(training_model.state_dict()),
-                    'optimizer_state': copy.deepcopy(optimizer.state_dict()),
-                })
-                print(f"\n📝 Epoch {epoch} 결과 저장: Acc={epoch_acc:.4f}, EO={mean_eo:.4f}, Loss={epoch_loss:.4f}")
+                update_best = False
+                reason = ""
+                
+                if epoch_acc > best_acc:
+                    update_best = True
+                    reason = f"정확도 향상 ({best_acc:.4f} → {epoch_acc:.4f})"
+                elif epoch_acc == best_acc:
+                    if mean_eo < best_eo:
+                        update_best = True
+                        reason = f"정확도 동일, EO 개선 ({best_eo:.4f} → {mean_eo:.4f})"
+                    elif mean_eo == best_eo and epoch_loss < best_loss:
+                        update_best = True
+                        reason = f"정확도·EO 동일, 손실 감소 ({best_loss:.4f} → {epoch_loss:.4f})"
+                
+                if update_best:
+                    best_acc = epoch_acc
+                    best_loss = epoch_loss
+                    best_eo = mean_eo
+                    best_ba = mean_ba
+                    if attractive_acc_epoch is not None:
+                        best_attractive_acc = attractive_acc_epoch
+                        best_attractive_eo = attractive_eo_epoch
+                    best_model_wts = copy.deepcopy(training_model.state_dict())
+                    best_optimizer_state = copy.deepcopy(optimizer.state_dict())
+                    print(f"\n✅ Best 모델 갱신: {reason}")
+                    print(f"   현재 Best - Acc: {best_acc:.4f}, EO: {best_eo:.4f}, Loss: {best_loss:.4f}")
+                else:
+                    print(f"\n⏸️  Best 모델 유지")
+                    print(f"   현재 에폭 - Acc: {epoch_acc:.4f}, EO: {mean_eo:.4f}, Loss: {epoch_loss:.4f}")
+                    print(f"   Best 기록 - Acc: {best_acc:.4f}, EO: {best_eo:.4f}, Loss: {best_loss:.4f}")
 
             import config
            
@@ -550,44 +562,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             hook_handle = None
             print("\n✨ [System] GRL 검증 완료. 로그 폭탄 방지를 위해 훅을 제거했습니다.")
             
-        print(f'에폭: {epoch}/{num_epochs - 1}')
-
-    # 🔥 Option B: 전 epoch 결과에서 best 선정
-    best_result = None
-    if epoch_results:
-        peak_acc = max(r['acc'] for r in epoch_results)
-        acc_threshold = peak_acc - BEST_MODEL_ACC_EPSILON
-
-        candidates = [r for r in epoch_results if r['acc'] >= acc_threshold]
-
-        if candidates:
-            best_result = min(candidates, key=lambda r: (r['eo'], r['loss']))
-        else:
-            best_result = max(epoch_results, key=lambda r: r['acc'])
-
-        best_acc = best_result['acc']
-        best_loss = best_result['loss']
-        best_eo = best_result['eo']
-        best_ba = best_result['ba']
-        best_model_wts = best_result['model_wts']
-        best_optimizer_state = best_result['optimizer_state']
-        if best_result['attractive_acc'] is not None:
-            best_attractive_acc = best_result['attractive_acc']
-            best_attractive_eo = best_result['attractive_eo']
-
-        print(f"\n{'='*60}")
-        print(f"🏆 Best 모델 선정 (Option B: 전 epoch 완료 후 선정)")
-        print(f"{'='*60}")
-        print(f"  Peak Accuracy:  {peak_acc:.4f}")
-        print(f"  Acc Threshold:  {acc_threshold:.4f} (peak - ε={BEST_MODEL_ACC_EPSILON})")
-        print(f"  후보 epoch 수:  {len(candidates)}/{len(epoch_results)}")
-        print(f"  선택 epoch:     {best_result['epoch']} (Acc={best_acc:.4f}, EO={best_eo:.4f}, Loss={best_loss:.4f})")
-        print(f"  Acc Gap:        {peak_acc - best_acc:.4f}")
-        for r in epoch_results:
-            marker = " <- BEST" if r['epoch'] == best_result['epoch'] else ""
-            in_threshold = "O" if r['acc'] >= acc_threshold else "X"
-            print(f"    epoch {r['epoch']}: Acc={r['acc']:.4f} [{in_threshold}] EO={r['eo']:.4f} Loss={r['loss']:.4f}{marker}")
-        print(f"{'='*60}\n")
+        print('에폭: {}/{} - 현재 best_acc: {:.4f}'.format(epoch, num_epochs - 1, best_acc))
 
     # 🔥 Best 모델 로드
     training_model.load_state_dict(best_model_wts)
@@ -614,8 +589,6 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         f.write(f"분석 시간: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Prune Iteration: {config.glo_prune_iter + 1}\n")
         f.write(f"총 재학습 에폭 수: {num_epochs}\n")
-        if best_result is not None:
-            f.write(f"Best Epoch:     {best_result['epoch'] + 1}/{num_epochs}\n")
         f.write(f"Seed: {seed}\n")
         f.write(f"Alpha: {alpha}\n")
         f.write(f"GRL Enabled: {use_grl}\n")
@@ -624,8 +597,6 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         f.write("📊 Best Model Performance\n")
         f.write("-"*80 + "\n")
         f.write(f"Best Accuracy:  {best_acc:.4f}\n")
-        f.write(f"Peak Accuracy:  {peak_acc:.4f}\n")
-        f.write(f"Acc Gap:        {peak_acc - best_acc:.4f} (ε={BEST_MODEL_ACC_EPSILON})\n")
         f.write(f"Best EO:        {best_eo:.4f}\n")
         f.write(f"Best Loss:      {best_loss:.4f}\n")
         f.write(f"Best BA:        {best_ba:.4f}\n")
