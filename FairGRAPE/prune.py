@@ -29,10 +29,11 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.5
+IMPT_TYPE2_ALPHA = 0.1
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 IMPT2_KEEP_PER_ITER = 0.9  # impt_type=2: 매 iteration마다 유지할 채널 가중치 비율
-IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.1  # impt_type=2: 각 레이어가 원본 채널의 최소 10%는 유지
+IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03  # impt_type=2: 각 레이어가 원본 채널의 최소 10%는 유지
+IMPT2_PROTECTION_RATIO = 0.005  # impt_type=2: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
 
 
 forward_mapping_dict = {
@@ -505,7 +506,7 @@ class FairGRAPE(Prunner):
         print("stop_batch:", stop_batch)
         
         if impt_type == 2:
-            print("alpha:", IMPT_TYPE2_ALPHA)
+            print("alpha:", IMPT_TYPE2_ALPHA, "| gamma:", IMPT2_PROTECTION_RATIO)
         else:
             print("alpha:", IMPT_TYPE1_ALPHA)
 
@@ -1202,6 +1203,60 @@ def _count_channel_weights(model, block_name: str, channel_k: int):
 
     return total
 
+
+def _compute_protected_channels(model, perf_by_layer, protection_ratio):
+    """
+    각 레이어에서 현재 살아있는 채널 중 perf 상위 γ%를 프루닝 후보에서 보호.
+
+    Returns:
+        protected_set: set of (block_name, channel_k) — 보호 채널
+        protected_per_layer: dict block_name -> int (보호 개수, 로깅용)
+        active_per_layer:    dict block_name -> int (활성 개수, 로깅용)
+    """
+    import math as _math
+
+    protected_set = set()
+    protected_per_layer = {}
+    active_per_layer = {}
+
+    if protection_ratio <= 0.0:
+        return protected_set, protected_per_layer, active_per_layer
+
+    for block_num in range(1, 18):
+        block_name = f'features.{block_num}'
+        conv0_name, conv1_name, _ = _get_impt_type2_block_layer_names(block_name)
+        ref_name = conv1_name if conv1_name is not None else conv0_name
+
+        perf_vec = perf_by_layer.get(ref_name)
+        if perf_vec is None:
+            continue
+
+        active_channels = [
+            ch for ch in range(perf_vec.shape[0])
+            if _count_channel_weights(model, block_name, ch) > 0
+        ]
+        n_active = len(active_channels)
+        active_per_layer[block_name] = n_active
+        if n_active == 0:
+            protected_per_layer[block_name] = 0
+            continue
+
+        n_protect = int(_math.ceil(n_active * protection_ratio))
+        if n_protect <= 0:
+            protected_per_layer[block_name] = 0
+            continue
+
+        ranked = sorted(
+            active_channels,
+            key=lambda ch: (-perf_vec[ch].item(), ch),
+        )
+        for ch in ranked[:n_protect]:
+            protected_set.add((block_name, ch))
+        protected_per_layer[block_name] = n_protect
+
+    return protected_set, protected_per_layer, active_per_layer
+
+
 def _save_channel_pruning_log(
     selected_channels,
     score_by_channel_dict,
@@ -1216,6 +1271,9 @@ def _save_channel_pruning_log(
     total_model_params=None,
     total_active_after=None,
     model_sparsity=None,
+    gamma=None,
+    protected_per_layer=None,
+    active_per_layer=None,
 ):
     import datetime
     os.makedirs(log_dir, exist_ok=True)
@@ -1255,6 +1313,9 @@ def _save_channel_pruning_log(
         f.write(f"  remove_target  : {remove_target}\n")
         f.write(f"  accum_removed  : {accum_removed}\n")
         f.write(f"  selected_channels : {len(selected_channels)}\n")
+        if gamma is not None:
+            f.write(f"  gamma             : {gamma:.4f}\n")
+        f.write(f"  remove_target_met : {'yes' if accum_removed >= remove_target else 'NO (γ/floor 제약)'}\n")
         if model_sparsity is not None:
             f.write(f"  total_params   : {total_model_params}\n")
             f.write(f"  active_after   : {total_active_after}\n")
@@ -1276,6 +1337,19 @@ def _save_channel_pruning_log(
             else:
                 f.write(f"  {block_name:<20} {'N/A':>8} {this_iter:>10} {'N/A':>8} {'N/A':>8}\n")
         f.write("\n")
+
+        # 레이어별 보호 영역 (γ 적용 시)
+        if gamma is not None and active_per_layer is not None:
+            f.write(f"[ 레이어별 보호 영역 (γ={gamma:.2f}) ]\n")
+            f.write(f"  {'layer':<20} {'active':>8} {'protected':>10} {'protect_%':>10}\n")
+            f.write("  " + "-" * 50 + "\n")
+            for block_num in range(1, 18):
+                block_name = f'features.{block_num}'
+                active = active_per_layer.get(block_name, 0)
+                protected = (protected_per_layer or {}).get(block_name, 0)
+                pct = (protected / active * 100) if active > 0 else 0.0
+                f.write(f"  {block_name:<20} {active:>8} {protected:>10} {pct:>9.1f}%\n")
+            f.write("\n")
 
         # 블록별 요약
         f.write("[ 블록별 제거 채널 수 ]\n")
@@ -1859,6 +1933,21 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             if combined is not None:
                 perf_by_layer[ref_name] = combined
 
+        # ── 보호 영역(γ): 각 레이어 perf 상위 γ% 채널을 후보 풀에서 제외 ──
+        gamma = float(IMPT2_PROTECTION_RATIO)
+        if not 0.0 <= gamma <= 1.0:
+            raise ValueError(f"IMPT2_PROTECTION_RATIO는 0~1 사이여야 합니다. 현재: {gamma}")
+
+        print(f"impt_type == 2: protection_ratio (γ)={gamma:.4f} 적용 — 각 레이어 perf 상위 γ% 보호")
+        protected_set, protected_per_layer, active_per_layer = _compute_protected_channels(
+            model, perf_by_layer, gamma
+        )
+        for bn in sorted(protected_per_layer.keys(), key=lambda x: int(x.split('.')[1])):
+            print(
+                f"  [γ={gamma:.2f}] {bn}: active={active_per_layer[bn]}, "
+                f"protected={protected_per_layer[bn]}"
+            )
+
         score_by_channel = []
         for conv1_name, phi_vec in phi_by_layer.items():
             perf_vec = perf_by_layer.get(conv1_name)
@@ -1880,6 +1969,8 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             combined_scores = (alpha * perf_scaled) - ((1.0 - alpha) * phi_scaled)
 
             for channel_k in range(len(combined_scores)):
+                if (block_name, channel_k) in protected_set:
+                    continue
                 weight_count = _count_channel_weights(model, block_name, channel_k)
                 if weight_count <= 0:
                     continue
@@ -1889,12 +1980,21 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             print("impt_type == 2: 제거 가능한 채널 점수를 만들지 못해 기존 마스크를 그대로 반환합니다.")
             return _build_channel_mask_list(model, [], device)
 
-        # ── remove_target: 현재 살아있는 채널 가중치의 일정 비율 제거 ──
-        active_channel_weights = sum(w for _, _, _, w in score_by_channel)
-        remove_target = int(round(active_channel_weights * (1.0 - IMPT2_KEEP_PER_ITER)))
+        # ── remove_target: 전체 활성 가중치(보호 포함)의 일정 비율 제거 ──
+        # 후보 풀 가중치 (보호 채널 제외)
+        candidate_channel_weights = sum(w for _, _, _, w in score_by_channel)
+        # 보호 채널 가중치
+        protected_channel_weights = sum(
+            _count_channel_weights(model, bn, ch)
+            for (bn, ch) in protected_set
+        )
+        # 전체 활성 가중치 (γ=0% 옵션 3과 동일한 sparsity 진행 속도 유지)
+        total_active_channel_weights = candidate_channel_weights + protected_channel_weights
+        remove_target = int(round(total_active_channel_weights * (1.0 - IMPT2_KEEP_PER_ITER)))
 
         print(
-            f"impt_type == 2 제거량 계산: active_channel_weights={active_channel_weights}, "
+            f"impt_type == 2 제거량 계산: total_active={total_active_channel_weights} "
+            f"(candidate={candidate_channel_weights}, protected={protected_channel_weights}), "
             f"keep_per_iter={IMPT2_KEEP_PER_ITER}, remove_target={remove_target}, "
             f"candidates={len(score_by_channel)}"
         )
@@ -1968,6 +2068,12 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             f"estimated_removed={accum_removed}, remove_target={remove_target}"
         )
 
+        if accum_removed < remove_target:
+            print(
+                f"⚠ remove_target 미달: γ={gamma:.2f} + floor 제약으로 "
+                f"removed={accum_removed} < target={remove_target}. 다음 iter로 진행."
+            )
+
         # 전체 모델 sparsity 계산 (Conv2d + Linear 기준)
         total_model_params = _count_total_weights(model)
         total_active_after = _count_active_weights(model) - accum_removed
@@ -2002,6 +2108,9 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             total_model_params=total_model_params,
             total_active_after=total_active_after,
             model_sparsity=model_sparsity,
+            gamma=gamma,
+            protected_per_layer=protected_per_layer,
+            active_per_layer=active_per_layer,
         )
 
         # 최종 마스크 리스트 반환 (layer 순서 유지)
