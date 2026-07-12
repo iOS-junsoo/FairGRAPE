@@ -168,6 +168,7 @@ def experiment(args):
 
     torch.cuda.empty_cache()
     best_model = make_model(network=network, n_classes=total_classes).to(device)
+    best_optimizer = None  # init_train을 건너뛰면 미정의 상태로 체크포인트 복원부에 도달하므로 기본값 필요
 
     # -----------------------
     # (3) 각 가지치기 기법별 파라미터 설정

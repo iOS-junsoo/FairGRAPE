@@ -636,7 +636,7 @@ def setseed(seed):
 # 10) 가지치기 전 모델 저장장
 # -----------------------------------------------------------------------------
 
-def save_unpruned_model(model, optimizer, scheduler, cfgs):
+def save_unpruned_model(model, optimizer, cfgs, scheduler=None):
     """
     unpruned 모델을 (가중치뿐 아니라 optimizer, scheduler 상태도 함께) 저장하기 위한 함수.
     cfgs는 (dataset, loss_type, sensitive_group, network, exp_idx) 등을 담은 튜플(또는 리스트)라고 가정합니다.
@@ -661,11 +661,17 @@ def save_unpruned_model(model, optimizer, scheduler, cfgs):
         exp_idx += 1
         model_path = f"{model_dir}/{dataset}_unpruned_{loss_type}_by{sensitive_group}_{network}_{exp_idx}.pt"
 
-    # Optimizer, Scheduler등도 함께 저장
+    # Optimizer, Scheduler등도 함께 저장.
+    # train()은 옵티마이저 객체가 아니라 state_dict(dict)를 반환하므로 둘 다 허용한다.
+    def _to_state(obj):
+        if obj is None:
+            return None
+        return obj.state_dict() if hasattr(obj, 'state_dict') else obj
+
     torch.save({
         'model_state': model.state_dict(),
-        'optimizer_state': optimizer.state_dict() if optimizer else None,
-        'scheduler_state': scheduler.state_dict() if scheduler else None
+        'optimizer_state': _to_state(optimizer),
+        'scheduler_state': _to_state(scheduler)
     }, model_path)
 
     print(f"가지치기 전 모델이 저장되었습니다: {model_path}")
