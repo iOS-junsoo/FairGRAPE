@@ -584,6 +584,56 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     training_model.load_state_dict(best_model_wts)
     print("❗학습 완료, 최고 정확도: ", best_acc, type(best_acc))
 
+    # 🔥 프루닝 통계 (이론치가 아닌 실제 마스크 기준으로 계산)
+    # GRL 래퍼가 씌워진 경우 base 모델만 대상으로 센다 (성별 분류기 파라미터 제외)
+    base_net = training_model.base_model if hasattr(training_model, 'base_model') else training_model
+
+    # 전체 파라미터 수: 프루너가 심어둔 mask 파라미터는 모델 파라미터가 아니므로 제외
+    total_params = sum(p.numel() for n, p in base_net.named_parameters()
+                       if n.split('.')[-1] != 'mask')
+
+    # 마스크가 걸린 레이어에서 실제 0으로 제거된 가중치 수
+    pruned_params = 0
+    masked_weight_total = 0
+    modules_by_name = dict(base_net.named_modules())
+    for layer in modules_by_name.values():
+        w = getattr(layer, 'weight', None)
+        m = getattr(layer, 'mask', None)
+        if w is None or m is None or tuple(m.shape) != tuple(w.shape):
+            continue
+        masked_weight_total += w.numel()
+        pruned_params += int((m == 0).sum().item())
+
+    # 프루닝 대상 전체: impt2 채널 프루닝 대상(features.1~17 conv0+conv1+conv2).
+    # 해당 구조가 없는 네트워크면 마스크 관리 레이어 전체로 대체.
+    try:
+        from prune import _count_all_channel_weights, _get_impt_type2_block_layer_names
+        target_layer_names = set()
+        for _bn in range(1, 18):
+            for _ln in _get_impt_type2_block_layer_names(f'features.{_bn}'):
+                if _ln is not None and _ln in modules_by_name:
+                    target_layer_names.add(_ln)
+        prune_target_total = _count_all_channel_weights(base_net)
+    except Exception:
+        target_layer_names, prune_target_total = set(), 0
+
+    if target_layer_names and prune_target_total > 0:
+        pruned_in_target = 0
+        for _ln in target_layer_names:
+            layer = modules_by_name[_ln]
+            w = getattr(layer, 'weight', None)
+            m = getattr(layer, 'mask', None)
+            if w is not None and m is not None and tuple(m.shape) == tuple(w.shape):
+                pruned_in_target += int((m == 0).sum().item())
+    else:
+        prune_target_total = masked_weight_total
+        pruned_in_target = pruned_params
+
+    pruned_pct_total = (pruned_params / total_params * 100) if total_params > 0 else 0.0
+    pruned_pct_target = (pruned_in_target / prune_target_total * 100) if prune_target_total > 0 else 0.0
+    print(f"✂️ 프루닝 통계(실제 마스크 기준): 전체 대비 {pruned_params:,}/{total_params:,} = {pruned_pct_total:.2f}%, "
+          f"대상 대비 {pruned_in_target:,}/{prune_target_total:,} = {pruned_pct_target:.2f}%")
+
     # 🔥 베스트 모델 최종 결과 저장
     import config
     save_dir = 'retrain_epoch_results'
@@ -620,6 +670,14 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             f.write(f"\n")
             f.write(f"Attractive Acc: {best_attractive_acc:.4f}\n")
             f.write(f"Attractive EO:  {best_attractive_eo:.4f}\n")
+        f.write("-"*80 + "\n\n")
+        f.write("-"*80 + "\n")
+        f.write("✂️ Pruning Statistics (실제 마스크 기준)\n")
+        f.write("-"*80 + "\n")
+        f.write(f"프루닝된 파라미터 / 전체 파라미터:        {pruned_params:,} / {total_params:,} "
+                f"(제거율 {pruned_pct_total:.2f}%)\n")
+        f.write(f"프루닝된 파라미터 / 프루닝 대상 파라미터: {pruned_in_target:,} / {prune_target_total:,} "
+                f"(제거율 {pruned_pct_target:.2f}%)\n")
         f.write("-"*80 + "\n\n")
     
     print(f"\n🏆 [베스트 모델 요약 저장] {best_model_path}")
