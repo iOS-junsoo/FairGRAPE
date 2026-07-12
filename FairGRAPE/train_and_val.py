@@ -216,7 +216,11 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
 
     epoch_logs = []
     import sys
+    import config
     from io import StringIO
+
+    # 민감그룹 id 목록 (gender=2, UTKFace race=4). main_test.experiment()에서 설정됨.
+    sensitive_groups = list(range(config.glo_n_groups))
     
     for epoch in range(num_epochs):
         print('에폭 {}/{}'.format(epoch, num_epochs - 1))
@@ -242,9 +246,9 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             running_gender_corrects = 0
 
             # Balanced Accuracy & EO 통계
-            balanced_acc_stats = [{(g, c): [0, 0] for g in [0,1] for c in [0,1]} 
+            balanced_acc_stats = [{(g, c): [0, 0] for g in sensitive_groups for c in [0,1]}
                                 for _ in range(len(col_used_training))]
-            eqodds_stats = [{g: {'TP':0, 'P':0, 'FP':0, 'N':0} for g in [0,1]} 
+            eqodds_stats = [{g: {'TP':0, 'P':0, 'FP':0, 'N':0} for g in sensitive_groups}
                            for _ in range(len(col_used_training))]
 
             for sample_batched in dataloaders[phase]:
@@ -334,7 +338,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     task_label = task_labels[:, task_idx]
                     _, task_pred = torch.max(task_out, 1)
 
-                    for g in [0,1]:
+                    for g in sensitive_groups:
                         # TPR
                         mask_pos = (gender_batched == g) & (task_label == 1)
                         P = mask_pos.sum().item()
@@ -381,35 +385,38 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             
             for task_idx in range(len(col_used_training)):
                 ba_list = []
-                for g in [0,1]:
+                for g in sensitive_groups:
                     for c in [0,1]:
                         correct, total = balanced_acc_stats[task_idx][(g,c)]
                         acc_val = correct/total if total>0 else None
-                        ba_list.append(acc_val if acc_val is not None else 0)
-                
+                        ba_list.append(acc_val)
+
                 valid_ba = [v for v in ba_list if v is not None]
                 ba_mean = np.mean(valid_ba) if valid_ba else None
                 all_ba_means.append(ba_mean if ba_mean is not None else 0)
 
-                # EO 계산
+                # EO 계산: 유효(표본 있는) 그룹만으로 max-min (worst-group)
                 tpr_vals, fpr_vals = [], []
-                for g in [0,1]:
+                for g in sensitive_groups:
                     TP = eqodds_stats[task_idx][g]['TP']
                     P = eqodds_stats[task_idx][g]['P']
                     FP = eqodds_stats[task_idx][g]['FP']
                     N = eqodds_stats[task_idx][g]['N']
                     tpr = TP/P if P>0 else None
                     fpr = FP/N if N>0 else None
-                    tpr_vals.append(tpr if tpr is not None else 0)
-                    fpr_vals.append(fpr if fpr is not None else 0)
-                
-                if all([v is not None for v in tpr_vals+fpr_vals]):
-                    tpr_gap = abs(tpr_vals[0] - tpr_vals[1])
-                    fpr_gap = abs(fpr_vals[0] - fpr_vals[1])
+                    tpr_vals.append(tpr)
+                    fpr_vals.append(fpr)
+
+                valid_tpr = [v for v in tpr_vals if v is not None]
+                valid_fpr = [v for v in fpr_vals if v is not None]
+                if len(valid_tpr) >= 2 and len(valid_fpr) >= 2:
+                    tpr_gap = max(valid_tpr) - min(valid_tpr)
+                    fpr_gap = max(valid_fpr) - min(valid_fpr)
                     eo = (tpr_gap + fpr_gap) / 2
                     all_eos.append(eo)
                 else:
-                    all_eos.append(0)
+                    # 유효 그룹 부족 시 EO 미계산(None) → 평균에서 제외
+                    all_eos.append(None)
 
             # ... (기존 출력 로직 유지) ...
             
@@ -422,9 +429,13 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             if len(all_ba_means) > 0:
                 mean_ba = np.mean(all_ba_means)
                 print(f"전체 클래스 평균 Balanced Accuracy: {mean_ba:.4f}")
-            if len(all_eos) > 0:
-                mean_eo = np.mean(all_eos)
+            valid_eos = [e for e in all_eos if e is not None]
+            if len(valid_eos) > 0:
+                mean_eo = np.mean(valid_eos)
                 print(f"전체 클래스 평균 EO: {mean_eo:.4f}")
+            else:
+                mean_eo = 0.0
+                print("전체 클래스 평균 EO: N/A (유효 그룹 부족)")
 
             # Attractive 클래스 개별 메트릭
             attractive_acc_epoch = None
@@ -433,23 +444,26 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                 attractive_acc_epoch = float(running_corrects[attractive_idx]) / len(dataloaders[phase].dataset)
                 attractive_eo_epoch = all_eos[attractive_idx]
                 print(f"Attractive Acc: {attractive_acc_epoch:.4f}")
-                print(f"Attractive EO:  {attractive_eo_epoch:.4f}")
+                if attractive_eo_epoch is not None:
+                    print(f"Attractive EO:  {attractive_eo_epoch:.4f}")
+                else:
+                    print("Attractive EO:  N/A (유효 그룹 부족)")
             print("="*50)
 
             # 2. 세부 결과 출력
             for task_idx in range(len(col_used_training)):
                 class_no = col_used_training[task_idx]
                 ba_list = []
-                for g in [0,1]:
+                for g in sensitive_groups:
                     for c in [0,1]:
                         correct, total = balanced_acc_stats[task_idx][(g,c)]
                         acc_val = correct/total if total>0 else None
-                        ba_list.append(acc_val if acc_val is not None else 0)
+                        ba_list.append(acc_val)
                         # None 체크를 추가한 출력
                         if acc_val is None:
-                            print(f"{class_no} (gender={g}, class={c}): {correct}/{total} = N/A")
+                            print(f"{class_no} (group={g}, class={c}): {correct}/{total} = N/A")
                         else:
-                            print(f"{class_no} (gender={g}, class={c}): {correct}/{total} = {acc_val:.4f}")
+                            print(f"{class_no} (group={g}, class={c}): {correct}/{total} = {acc_val:.4f}")
                 
                 valid_ba = [v for v in ba_list if v is not None]
                 ba_mean = np.mean(valid_ba) if valid_ba else None
@@ -458,29 +472,31 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                 else:
                     print(f"{class_no} ⭐⭐⭐ Balanced Accuracy: {ba_mean:.4f}\n")
 
-                # Equalized Odds 출력
+                # Equalized Odds 출력 (유효 그룹만으로 max-min)
                 tpr_vals, fpr_vals = [], []
-                for g in [0,1]:
+                for g in sensitive_groups:
                     TP = eqodds_stats[task_idx][g]['TP']
                     P = eqodds_stats[task_idx][g]['P']
                     FP = eqodds_stats[task_idx][g]['FP']
                     N = eqodds_stats[task_idx][g]['N']
                     tpr = TP/P if P>0 else None
                     fpr = FP/N if N>0 else None
-                    tpr_vals.append(tpr if tpr is not None else 0)
-                    fpr_vals.append(fpr if fpr is not None else 0)
+                    tpr_vals.append(tpr)
+                    fpr_vals.append(fpr)
                     if tpr is None:
-                        print(f"{class_no} TPR (gender={g}): {TP}/{P} = N/A")
+                        print(f"{class_no} TPR (group={g}): {TP}/{P} = N/A")
                     else:
-                        print(f"{class_no} TPR (gender={g}): {TP}/{P} = {tpr:.4f}")
+                        print(f"{class_no} TPR (group={g}): {TP}/{P} = {tpr:.4f}")
                     if fpr is None:
-                        print(f"{class_no} FPR (gender={g}): {FP}/{N} = N/A")
+                        print(f"{class_no} FPR (group={g}): {FP}/{N} = N/A")
                     else:
-                        print(f"{class_no} FPR (gender={g}): {FP}/{N} = {fpr:.4f}")
+                        print(f"{class_no} FPR (group={g}): {FP}/{N} = {fpr:.4f}")
 
-                if all([v is not None for v in tpr_vals+fpr_vals]):
-                    tpr_gap = abs(tpr_vals[0] - tpr_vals[1])
-                    fpr_gap = abs(fpr_vals[0] - fpr_vals[1])
+                valid_tpr = [v for v in tpr_vals if v is not None]
+                valid_fpr = [v for v in fpr_vals if v is not None]
+                if len(valid_tpr) >= 2 and len(valid_fpr) >= 2:
+                    tpr_gap = max(valid_tpr) - min(valid_tpr)
+                    fpr_gap = max(valid_fpr) - min(valid_fpr)
                     eo = (tpr_gap + fpr_gap) / 2
                     print(f"{class_no} TPR gap: {tpr_gap:.4f}")
                     print(f"{class_no} FPR gap: {fpr_gap:.4f}")
@@ -804,7 +820,7 @@ import sys
 from io import StringIO
 import os
 
-def analyze_balanced_accuracy(df, selected_cols, epoch, save_text_file=True, text_filename=None, save_folder=None):
+def analyze_balanced_accuracy(df, selected_cols, epoch, save_text_file=True, text_filename=None, save_folder=None, group_col='gender', group_values=None):
     """
     CelebA FairGRAPE 데이터셋에 대한 Balanced Accuracy 분석 함수
     
@@ -843,8 +859,8 @@ def analyze_balanced_accuracy(df, selected_cols, epoch, save_text_file=True, tex
         if pred_col not in df.columns:
             return None, None, f"예측값 컬럼을 찾을 수 없습니다: {pred_col}"
         
-        # 해당 성별과 클래스에 속하는 데이터 필터링
-        mask = (df['gender'] == gender) & (df[attribute] == target_class)
+        # 해당 그룹과 클래스에 속하는 데이터 필터링
+        mask = (df[group_col] == gender) & (df[attribute] == target_class)
         group_data = df[mask]
         
         total_count = len(group_data)
@@ -878,12 +894,14 @@ def analyze_balanced_accuracy(df, selected_cols, epoch, save_text_file=True, tex
         print(f"분석 시간: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"총 데이터 개수: {len(df):,}")
         print(f"총 컬럼 개수: {len(df.columns)}")
-        print(f"성별 분포:")
-        #gender_counts = df['gender'].value_counts()
-        gender_counts = df['gender'].value_counts()
+        print(f"그룹({group_col}) 분포:")
+        gender_counts = df[group_col].value_counts()
         for gender, count in gender_counts.items():
-            gender_label = "여성" if gender == 0 else "남성"
-            print(f"  {gender_label} (gender={gender}): {count:,}개 ({count/len(df)*100:.1f}%)")
+            gender_label = f"{group_col}={gender}"
+            print(f"  {gender_label}: {count:,}개 ({count/len(df)*100:.1f}%)")
+
+        # 분석할 그룹 목록: 지정이 없으면 데이터에서 유도
+        analysis_groups = group_values if group_values is not None else sorted(df[group_col].dropna().unique())
 
         print(f"\n분석할 속성: {len(selected_cols)}개")
         print("-"*80)
@@ -918,14 +936,14 @@ def analyze_balanced_accuracy(df, selected_cols, epoch, save_text_file=True, tex
             current_attribute_accuracies = []
             current_attribute_results = []  # 현재 속성의 상세 결과들
             
-            # 4가지 조합에 대해 계산 (성별 2개 × 클래스 2개)
-            for gender in [0, 1]:
+            # (그룹 수 × 클래스 2개) 조합에 대해 계산
+            for gender in analysis_groups:
                 for target_class in [0, 1]:
                     correct, total, accuracy = calculate_balanced_accuracy_simple(
                         df, attribute, gender, target_class
                     )
-                    
-                    gender_label = "여성" if gender == 0 else "남성"
+
+                    gender_label = f"{group_col}={gender}"
                     class_label = attribute if target_class == 1 else f"Not_{attribute}"
                     
                     if accuracy is None:

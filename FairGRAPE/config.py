@@ -9,3 +9,4 @@ glo_retrain_epoch = 0 # 에폭 재학습 횟수
 glo_is_checked = False # 체크포인트 여부
 glo_imp_rate = 0.0 # 중요도 비율
 glo_use_grl = True # GRL 기반 debiasing 사용 여부
+glo_n_groups = 2 # 민감그룹 수 (gender=2, UTKFace race=4). main_test.experiment()에서 설정됨.

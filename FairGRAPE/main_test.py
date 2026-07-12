@@ -148,6 +148,12 @@ def experiment(args):
     elif dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA']:
         print('이미지 가독성 검사를 건너뜁니다 (--skip_readable_check).')
 
+    # 민감그룹 수를 전역(config)으로 전달 (gender=2, UTKFace race=4)
+    if sensitive_group in frames['train'].columns:
+        n_sensitive_groups = len(set(frames['train'][sensitive_group]))
+        config.glo_n_groups = n_sensitive_groups
+        print(f"민감그룹 '{sensitive_group}' 그룹 수: {n_sensitive_groups}")
+
     lr_schedule = [1e-4, 1e-5, 1e-6]
     # 여기서 make_datasets 호출 시 shuffle=True로 되어 있음
     train_loader, test_loader = make_datasets(frames['train'], frames['val'], True, batch_size, col_used)
@@ -373,11 +379,13 @@ def experiment(args):
             running_loss = 0.0
             running_corrects = [0] * len(col_used_training)
             
+            # 민감그룹 id 목록 (gender=2, UTKFace race=4)
+            sensitive_groups = list(range(config.glo_n_groups))
             # Balanced Accuracy용
-            balanced_acc_stats = [{(g, c): [0, 0] for g in [0,1] for c in [0,1]} 
+            balanced_acc_stats = [{(g, c): [0, 0] for g in sensitive_groups for c in [0,1]}
                                 for _ in range(len(col_used_training))]
             # Equalized Odds용
-            eqodds_stats = [{g: {'TP':0, 'P':0, 'FP':0, 'N':0} for g in [0,1]} 
+            eqodds_stats = [{g: {'TP':0, 'P':0, 'FP':0, 'N':0} for g in sensitive_groups}
                         for _ in range(len(col_used_training))]
             
             with torch.no_grad():
@@ -405,7 +413,7 @@ def experiment(args):
                         task_label = task_labels[:, task_idx]
                         _, task_pred = torch.max(task_out, 1)
                         
-                        for g in [0,1]:
+                        for g in sensitive_groups:
                             mask_pos = (gender_batched == g) & (task_label == 1)
                             P = mask_pos.sum().item()
                             TP = ((task_pred == 1) & mask_pos).sum().item()
@@ -435,34 +443,42 @@ def experiment(args):
             
             for task_idx in range(len(col_used_training)):
                 ba_list = []
-                for g in [0,1]:
+                for g in sensitive_groups:
                     for c in [0,1]:
                         correct, total = balanced_acc_stats[task_idx][(g,c)]
-                        acc_val = correct/total if total>0 else 0
+                        acc_val = correct/total if total>0 else None
                         ba_list.append(acc_val)
-                
-                ba_mean = np.mean(ba_list)
+
+                valid_ba = [v for v in ba_list if v is not None]
+                ba_mean = np.mean(valid_ba) if valid_ba else None
                 all_ba_means.append(ba_mean)
-                
-                # EO 계산
+
+                # EO 계산: 유효(표본 있는) 그룹만으로 max-min (worst-group)
                 tpr_vals, fpr_vals = [], []
-                for g in [0,1]:
+                for g in sensitive_groups:
                     TP = eqodds_stats[task_idx][g]['TP']
                     P = eqodds_stats[task_idx][g]['P']
                     FP = eqodds_stats[task_idx][g]['FP']
                     N = eqodds_stats[task_idx][g]['N']
-                    tpr = TP/P if P>0 else 0
-                    fpr = FP/N if N>0 else 0
+                    tpr = TP/P if P>0 else None
+                    fpr = FP/N if N>0 else None
                     tpr_vals.append(tpr)
                     fpr_vals.append(fpr)
-                
-                tpr_gap = abs(tpr_vals[0] - tpr_vals[1])
-                fpr_gap = abs(fpr_vals[0] - fpr_vals[1])
-                eo = (tpr_gap + fpr_gap) / 2
-                all_eos.append(eo)
-            
-            mean_ba = np.mean(all_ba_means)
-            mean_eo = np.mean(all_eos)
+
+                valid_tpr = [v for v in tpr_vals if v is not None]
+                valid_fpr = [v for v in fpr_vals if v is not None]
+                if len(valid_tpr) >= 2 and len(valid_fpr) >= 2:
+                    tpr_gap = max(valid_tpr) - min(valid_tpr)
+                    fpr_gap = max(valid_fpr) - min(valid_fpr)
+                    eo = (tpr_gap + fpr_gap) / 2
+                    all_eos.append(eo)
+                else:
+                    all_eos.append(None)
+
+            valid_ba_means = [v for v in all_ba_means if v is not None]
+            valid_eos = [e for e in all_eos if e is not None]
+            mean_ba = np.mean(valid_ba_means) if valid_ba_means else 0.0
+            mean_eo = np.mean(valid_eos) if valid_eos else 0.0
             
             # Attractive 클래스 개별 메트릭
             attractive_idx = None
@@ -476,6 +492,9 @@ def experiment(args):
                 attractive_acc = float(running_corrects[attractive_idx]) / len(dataloaders['test'].dataset)
                 attractive_eo = all_eos[attractive_idx]
 
+            def _fmt_metric(v):
+                return f"{v:.4f}" if v is not None else "N/A"
+
             # 2. 결과 출력 및 저장
             print(f"\n📊 Prune Iteration {i+1} 성능:")
             print(f"  Accuracy: {epoch_acc:.4f}")
@@ -484,7 +503,7 @@ def experiment(args):
             print(f"  EO:       {mean_eo:.4f}")
             if attractive_acc is not None:
                 print(f"  Attractive Acc: {attractive_acc:.4f}")
-                print(f"  Attractive EO:  {attractive_eo:.4f}")
+                print(f"  Attractive EO:  {_fmt_metric(attractive_eo)}")
             
             # 3. 결과 파일 저장
             save_dir = 'no_retrain_results'
@@ -511,7 +530,7 @@ def experiment(args):
                 f.write(f"EO:        {mean_eo:.4f}\n")
                 if attractive_acc is not None:
                     f.write(f"\nAttractive Acc: {attractive_acc:.4f}\n")
-                    f.write(f"Attractive EO:  {attractive_eo:.4f}\n")
+                    f.write(f"Attractive EO:  {_fmt_metric(attractive_eo)}\n")
                 f.write("-"*80 + "\n\n")
                 
                 # 세부 결과도 저장
@@ -519,8 +538,8 @@ def experiment(args):
                 f.write("-"*80 + "\n")
                 for task_idx in range(len(col_used_training)):
                     f.write(f"\nTask {task_idx} ({col_used_training[task_idx]}):\n")
-                    f.write(f"  BA: {all_ba_means[task_idx]:.4f}\n")
-                    f.write(f"  EO: {all_eos[task_idx]:.4f}\n")
+                    f.write(f"  BA: {_fmt_metric(all_ba_means[task_idx])}\n")
+                    f.write(f"  EO: {_fmt_metric(all_eos[task_idx])}\n")
             
             print(f"✅ [결과 저장] {result_path}")
             

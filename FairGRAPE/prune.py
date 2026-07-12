@@ -29,7 +29,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.9
+IMPT_TYPE2_ALPHA = 0.5
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 IMPT2_KEEP_PER_ITER = 0.9  # impt_type=2: 매 iteration마다 유지할 채널 가중치 비율
 IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03  # impt_type=2: 각 레이어가 원본 채널의 최소 10%는 유지
@@ -1116,15 +1116,25 @@ def _pool_channel_values(tensor: torch.Tensor, use_abs: bool = False) -> torch.T
     return pooled.reshape(pooled.shape[0], pooled.shape[1], -1).mean(dim=2)
 
 
-def _compute_binary_group_gap(channel_values: torch.Tensor, target_y: torch.Tensor, sensitive_a: torch.Tensor, y_value: int):
-    group0_mask = (target_y == y_value) & (sensitive_a == 0)
-    group1_mask = (target_y == y_value) & (sensitive_a == 1)
-    if not group0_mask.any() or not group1_mask.any():
+def _compute_group_gap(channel_values: torch.Tensor, target_y: torch.Tensor, sensitive_a: torch.Tensor, y_value: int, groups):
+    # 그룹별 채널 평균의 max-min (worst-group gap). 표본이 없는 그룹은 제외하고,
+    # 유효 그룹이 2개 미만이면 None. R=2에서는 max-min == |g0-g1| 로 기존과 동일.
+    group_means = []
+    for g in groups:
+        mask = (target_y == y_value) & (sensitive_a == g)
+        if not mask.any():
+            continue
+        group_means.append(channel_values[mask].mean(dim=0).to(torch.float64))
+
+    if len(group_means) < 2:
         return None
 
-    group0_mean = channel_values[group0_mask].mean(dim=0).to(torch.float64)
-    group1_mean = channel_values[group1_mask].mean(dim=0).to(torch.float64)
-    return torch.abs(group0_mean - group1_mean)
+    stacked = torch.stack(group_means, dim=0)
+    return stacked.max(dim=0).values - stacked.min(dim=0).values
+
+
+def _compute_binary_group_gap(channel_values: torch.Tensor, target_y: torch.Tensor, sensitive_a: torch.Tensor, y_value: int):
+    return _compute_group_gap(channel_values, target_y, sensitive_a, y_value, [0, 1])
 
 
 def _aggregate_channel_importance(score_tensor: torch.Tensor) -> torch.Tensor:
@@ -1426,11 +1436,15 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
     del masked_grads
     print("-------------compute_phi_k-------------")
 
-    if sensitive_group not in (None, 'gender'):
-        raise NotImplementedError("impt_type == 2 는 현재 gender 기준 민감 그룹만 지원합니다.")
+    if sensitive_group not in (None, 'gender', 'race'):
+        raise NotImplementedError("impt_type == 2 는 현재 gender/race 기준 민감 그룹만 지원합니다.")
 
-    if not col_names or col_names[-1] != 'gender':
-        raise ValueError(f"impt_type == 2 는 마지막 라벨 컬럼이 gender 여야 합니다. 현재: {col_names[-1] if col_names else None}")
+    expected_sensitive_col = sensitive_group if sensitive_group is not None else 'gender'
+    if not col_names or col_names[-1] != expected_sensitive_col:
+        raise ValueError(f"impt_type == 2 는 마지막 라벨 컬럼이 {expected_sensitive_col} 여야 합니다. 현재: {col_names[-1] if col_names else None}")
+
+    import config
+    groups = list(range(config.glo_n_groups))
 
     target_layers = _get_impt_type2_target_layers(model)
     if not target_layers:
@@ -1557,7 +1571,7 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
             for attr_idx in range(num_attrs):
                 target_y = label_batched[:, attr_idx].long()
                 for layer_name, pooled_act in pooled_activations.items():
-                    gap_y0 = _compute_binary_group_gap(pooled_act, target_y, sensitive_a, y_value=0)
+                    gap_y0 = _compute_group_gap(pooled_act, target_y, sensitive_a, y_value=0, groups=groups)
                     if gap_y0 is not None:
                         if layer_name not in gap_y0_sums:
                             gap_y0_sums[layer_name] = gap_y0
@@ -1565,7 +1579,7 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
                             gap_y0_sums[layer_name] += gap_y0
                         gap_y0_counts[layer_name] += 1
 
-                    gap_y1 = _compute_binary_group_gap(pooled_act, target_y, sensitive_a, y_value=1)
+                    gap_y1 = _compute_group_gap(pooled_act, target_y, sensitive_a, y_value=1, groups=groups)
                     if gap_y1 is not None:
                         if layer_name not in gap_y1_sums:
                             gap_y1_sums[layer_name] = gap_y1
@@ -1579,11 +1593,11 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
                 pooled_f0 = _pool_channel_values(f0_act.detach(), use_abs=False)
                 for attr_idx in range(num_attrs):
                     target_y = label_batched[:, attr_idx].long()
-                    gap_y0 = _compute_binary_group_gap(pooled_f0, target_y, sensitive_a, y_value=0)
+                    gap_y0 = _compute_group_gap(pooled_f0, target_y, sensitive_a, y_value=0, groups=groups)
                     if gap_y0 is not None:
                         f0_gap_y0_sums['features.0.0'] = f0_gap_y0_sums.get('features.0.0', torch.zeros_like(gap_y0)) + gap_y0
                         f0_gap_y0_counts['features.0.0'] += 1
-                    gap_y1 = _compute_binary_group_gap(pooled_f0, target_y, sensitive_a, y_value=1)
+                    gap_y1 = _compute_group_gap(pooled_f0, target_y, sensitive_a, y_value=1, groups=groups)
                     if gap_y1 is not None:
                         f0_gap_y1_sums['features.0.0'] = f0_gap_y1_sums.get('features.0.0', torch.zeros_like(gap_y1)) + gap_y1
                         f0_gap_y1_counts['features.0.0'] += 1

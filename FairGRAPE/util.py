@@ -485,16 +485,15 @@ def save_output(best_model, cfgs, csv_savedir="fair_dfs", save_file=True):
                     'TPR': tpr[g], 'FPR': fpr[g]
                 }
 
-            # ── (3) 두 집단 모두 값이 있어야 EO 계산
-            if len(tpr) != 2 or len(fpr) != 2 or np.any(pd.isna(list(tpr.values()))) \
-                                                or np.any(pd.isna(list(fpr.values()))):
-                print(f"[정보] {truth_col} → 표본 부족으로 EO 미계산")
+            # ── (3) 유효(표본 있는) 집단 2개 이상일 때만 EO 계산: max-min (worst-group)
+            valid_tpr = {g: v for g, v in tpr.items() if not pd.isna(v)}
+            valid_fpr = {g: v for g, v in fpr.items() if not pd.isna(v)}
+            if len(valid_tpr) < 2 or len(valid_fpr) < 2:
+                print(f"[정보] {truth_col} → 유효 그룹 부족으로 EO 미계산")
                 continue
 
-            g0, g1 = sorted(tpr.keys())     # 집단 키 정렬(보통 0,1)
-
-            tpr_diff = abs(tpr[g0] - tpr[g1])
-            fpr_diff = abs(fpr[g0] - fpr[g1])
+            tpr_diff = max(valid_tpr.values()) - min(valid_tpr.values())
+            fpr_diff = max(valid_fpr.values()) - min(valid_fpr.values())
             eo_diff  = (tpr_diff + fpr_diff) / 2
 
             print(f"{truth_col:<25} EO_diff = {eo_diff:.3f}")
@@ -509,7 +508,7 @@ def save_output(best_model, cfgs, csv_savedir="fair_dfs", save_file=True):
 
     
 
-    total_EO_diff = calc_equalized_odds(fair_df, col_used[:-1])
+    total_EO_diff = calc_equalized_odds(fair_df, col_used[:-1], group_col=sensitive_group)
 
     
     config.glo_EO = total_EO_diff
