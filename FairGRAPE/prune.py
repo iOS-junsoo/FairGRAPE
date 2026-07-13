@@ -1483,10 +1483,14 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
     test_loader, _ = make_datasets(test_frame, test_frame, True, batch_size, col_used=col_names)
     criterion = nn.CrossEntropyLoss()
 
-    gap_y0_sums = {}
-    gap_y1_sums = {}
-    gap_y0_counts = defaultdict(int)
-    gap_y1_counts = defaultdict(int)
+    # 그룹 격차를 배치별 max-min의 평균으로 내면 안 된다: max-min은 비선형이라
+    # 소표본 셀(예: UTKFace Asian∧old는 배치당 ~3개)에서 참 격차가 0이어도 큰 유령 격차가 잡힌다
+    # (Jensen 편향). 전 배치에 걸쳐 (y, group) 셀별 활성 합/표본수를 누적한 뒤,
+    # 마지막에 한 번만 그룹평균 → max-min 을 계산한다.
+    n_groups = len(groups)
+    n_cells = 2 * n_groups                 # cell index = y_value * n_groups + group
+    cell_act_sums = {}                     # (layer_name, attr_idx) -> [n_cells, C] float64
+    cell_act_counts = {}                   # (layer_name, attr_idx) -> [n_cells] float64
     mean_grad_sums = {}
     mean_grad_counts = defaultdict(int)
     activations = {}
@@ -1570,22 +1574,25 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
 
             for attr_idx in range(num_attrs):
                 target_y = label_batched[:, attr_idx].long()
-                for layer_name, pooled_act in pooled_activations.items():
-                    gap_y0 = _compute_group_gap(pooled_act, target_y, sensitive_a, y_value=0, groups=groups)
-                    if gap_y0 is not None:
-                        if layer_name not in gap_y0_sums:
-                            gap_y0_sums[layer_name] = gap_y0
-                        else:
-                            gap_y0_sums[layer_name] += gap_y0
-                        gap_y0_counts[layer_name] += 1
+                # 기존과 동일한 포함 조건: y ∈ {0,1} 이고 group ∈ [0, n_groups) 인 샘플만 집계
+                valid = (target_y >= 0) & (target_y <= 1) & (sensitive_a >= 0) & (sensitive_a < n_groups)
+                if not bool(valid.any()):
+                    continue
+                cell_id = (target_y[valid] * n_groups + sensitive_a[valid]).long()
+                cell_n = torch.bincount(cell_id, minlength=n_cells).to(torch.float64)
 
-                    gap_y1 = _compute_group_gap(pooled_act, target_y, sensitive_a, y_value=1, groups=groups)
-                    if gap_y1 is not None:
-                        if layer_name not in gap_y1_sums:
-                            gap_y1_sums[layer_name] = gap_y1
-                        else:
-                            gap_y1_sums[layer_name] += gap_y1
-                        gap_y1_counts[layer_name] += 1
+                for layer_name, pooled_act in pooled_activations.items():
+                    key = (layer_name, attr_idx)
+                    act = pooled_act[valid].to(torch.float64)
+                    if key not in cell_act_sums:
+                        cell_act_sums[key] = torch.zeros(
+                            n_cells, act.shape[1], dtype=torch.float64, device=act.device
+                        )
+                        cell_act_counts[key] = torch.zeros(
+                            n_cells, dtype=torch.float64, device=act.device
+                        )
+                    cell_act_sums[key].index_add_(0, cell_id, act)
+                    cell_act_counts[key] += cell_n
 
             # features.0.0 activation gap 누적 (weight-level phi용)
             if 'features.0.0' in f0_activations:
@@ -1617,23 +1624,38 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
         torch.backends.cudnn.enabled = prev_cudnn_enabled
         torch.backends.cudnn.benchmark = prev_cudnn_benchmark
 
+    def _pooled_group_gap(layer_name, y_value, zero_vec):
+        """전 배치에 걸쳐 누적된 (y, group) 셀 평균으로부터 max-min 격차를 '한 번만' 계산.
+        attr가 여러 개면 attr별 격차의 평균 (기존 스케일 유지).
+        유효(표본>0) 그룹이 2개 미만인 attr는 스킵. 반환: (격차 벡터, 기여 attr 수)"""
+        gaps = []
+        for attr_idx in range(num_attrs):
+            key = (layer_name, attr_idx)
+            if key not in cell_act_sums:
+                continue
+            sums = cell_act_sums[key]
+            cnts = cell_act_counts[key]
+            valid_rows = [
+                y_value * n_groups + g
+                for g in range(n_groups)
+                if float(cnts[y_value * n_groups + g]) > 0
+            ]
+            if len(valid_rows) < 2:
+                continue
+            means = torch.stack([sums[r] / cnts[r] for r in valid_rows], dim=0)
+            gaps.append(means.max(dim=0).values - means.min(dim=0).values)
+        if not gaps:
+            return zero_vec, 0
+        return torch.stack(gaps, dim=0).mean(dim=0), len(gaps)
+
     phi_by_layer = {}
     print("phi 레이어별 요약:")
     for layer_name, layer in target_layers.items():
         num_channels = int(layer.weight.shape[0])
         zero_vec = torch.zeros(num_channels, dtype=torch.float64, device=device)
 
-        gap_y0 = gap_y0_sums.get(layer_name, zero_vec)
-        if gap_y0_counts[layer_name] > 0:
-            gap_y0 = gap_y0 / gap_y0_counts[layer_name]
-        else:
-            gap_y0 = zero_vec
-
-        gap_y1 = gap_y1_sums.get(layer_name, zero_vec)
-        if gap_y1_counts[layer_name] > 0:
-            gap_y1 = gap_y1 / gap_y1_counts[layer_name]
-        else:
-            gap_y1 = zero_vec
+        gap_y0, n_attr_y0 = _pooled_group_gap(layer_name, 0, zero_vec)
+        gap_y1, n_attr_y1 = _pooled_group_gap(layer_name, 1, zero_vec)
 
         activation_gap = gap_y0 + gap_y1
         mean_gradient = mean_grad_sums.get(layer_name, zero_vec)
@@ -1647,7 +1669,7 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
         print(
             f"  ✓ {layer_name}: channels={num_channels}, "
             f"phi_mean={phi.mean().item():.6e}, phi_max={phi.max().item():.6e}, "
-            f"gap_y0_terms={gap_y0_counts[layer_name]}, gap_y1_terms={gap_y1_counts[layer_name]}, "
+            f"gap_y0_attrs={n_attr_y0}, gap_y1_attrs={n_attr_y1}, "
             f"grad_batches={mean_grad_counts[layer_name]}"
         )
 
