@@ -31,7 +31,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 IMPT_TYPE1_ALPHA = 0.0
 IMPT_TYPE2_ALPHA = 0.5
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
-IMPT2_KEEP_PER_ITER = 0.9  # impt_type=2: 매 iteration마다 유지할 채널 가중치 비율
+IMPT2_KEEP_PER_ITER = 0.975  # impt_type=2: 매 iteration마다 유지할 채널 가중치 비율
 IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03  # impt_type=2: 각 레이어가 원본 채널의 최소 10%는 유지
 IMPT2_PROTECTION_RATIO = 0.005  # impt_type=2: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
 
