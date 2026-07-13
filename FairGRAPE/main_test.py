@@ -94,6 +94,9 @@ def experiment(args):
             total_classes, output_cols_each_task, col_used_training = 4, [(0, 4)], [loss_type]
         elif loss_type == 'gender':
             total_classes, output_cols_each_task, col_used_training = 2, [(0, 2)], [loss_type]
+        elif loss_type == 'age':
+            # 이진 age task: dataset.relabel()이 생성하는 age_bin 컬럼 사용 (임계값은 dataset.AGE_BINARY_THRESHOLD)
+            total_classes, output_cols_each_task, col_used_training = 2, [(0, 2)], ['age_bin']
         else:
             total_classes, output_cols_each_task, col_used_training = 6, [(0, 4), (4, 6)], ['race', 'gender']
         col_used = col_used_training + [sensitive_group]

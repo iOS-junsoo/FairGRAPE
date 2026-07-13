@@ -23,6 +23,11 @@ import json
 import warnings
 warnings.filterwarnings("ignore")
 
+# age 이진화 임계값: 구간 하한(lower bound) >= threshold → 1(older), 미만 → 0(younger).
+# UTKFace age는 문자열 구간(0-2/3-9/10-19/20-29/30-39/40-49/50-59/60-69/more than 70)이므로
+# 구간을 정확히 가르려면 {3, 10, 20, 30, 40, 50, 60, 70} 중에서 선택할 것. 실험자가 조정하는 값.
+AGE_BINARY_THRESHOLD = 30
+
 # 한 이미지 내의 모든 얼굴이 동일한 세트에 속하도록 train/validation/test 세트로 분할
 def split_image_name(val):
     return val.split('/')[-1]
@@ -86,6 +91,14 @@ def relabel(frame, seven_races=True, drop_race=False):
         frame.loc[frame['gender'] == 'Male', 'gender'] = 0
         frame.loc[frame['gender'] == 'Female', 'gender'] = 1
 
+    # UTKFace age(문자열 구간) → 이진 age_bin 라벨 (task=age 용)
+    # age는 '0-2', '30-39', 'more than 70' 같은 구간 문자열이므로 구간 하한을 파싱해 비교한다.
+    # seven_races=False 경로(UTKFace/CelebA)로 게이트: FairFace(seven_races=True)는 제외되고
+    # CelebA는 age 컬럼이 없어 결과적으로 UTKFace에만 생성된다.
+    if not seven_races and 'age' in frame.columns:
+        age_lower = frame['age'].astype(str).str.extract(r'(\d+)', expand=False).astype(float)
+        frame['age_bin'] = (age_lower >= AGE_BINARY_THRESHOLD).astype(int)
+
     # 7개 인종이 아닌 경우, race 라벨을 합치거나 제거
     if not seven_races and 'race' in frame.columns:
         # 여기서는 LFWA+(Indian, Latino 없음) & UTK(Latino 없음)과 비교하기 위해
@@ -143,6 +156,12 @@ def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=Fal
 
     frame = relabel(frame, seven_races, drop_race)
 
+    # 라벨 컬럼 정수 dtype 보장: relabel의 .loc 대입은 object dtype으로 남을 수 있어
+    # 라벨 텐서화(torch.from_numpy(np.asarray(...)))가 깨지는 것을 방지한다. 값은 불변.
+    for c in ['race', 'gender', 'age_bin']:
+        if c in frame.columns:
+            frame[c] = frame[c].astype(int)
+
     if imbalance:
         frame = add_imbalance(frame)
 
@@ -186,6 +205,14 @@ def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=Fal
     train_frame = frame[image_name_frame.isin(image_names_train)].reset_index(drop=True)
     val_frame = frame[image_name_frame.isin(image_names_val)].reset_index(drop=True)
     test_frame = frame[image_name_frame.isin(image_names_test)].reset_index(drop=True)
+
+    # age 이진 라벨 분포 리포트 (threshold 판단용, train split 기준)
+    if 'age_bin' in train_frame.columns:
+        print(f'[age] threshold={AGE_BINARY_THRESHOLD} (구간 하한 기준)')
+        print('[age] balance:', Counter(train_frame['age_bin']))
+        if 'race' in train_frame.columns:
+            print('[age] per-race base rate:\n', train_frame.groupby('race')['age_bin'].mean())
+            print('[age] per (race, age_bin) counts:\n', train_frame.groupby(['race', 'age_bin']).size())
 
     return {'train': train_frame, "val": val_frame, "test": test_frame, "all": frame}
 
