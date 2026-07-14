@@ -101,7 +101,9 @@ def experiment(args):
             total_classes, output_cols_each_task, col_used_training = 6, [(0, 4), (4, 6)], ['race', 'gender']
         col_used = col_used_training + [sensitive_group]
         epoches = [13, 3, 3]
-        frames = make_frame(csv, face_dir, seven_races=False)
+        # UTKFace는 drop_race를 메인 파이프라인 전체(사전학습·φ·재학습·평가)에 적용한다.
+        # 예: --drop_race 3 4 → Asian·Indian 제거 후 White/Black 2그룹으로 전 과정 진행.
+        frames = make_frame(csv, face_dir, seven_races=False, drop_race=drop_race)
         if drop_race:
             frames_minority = make_frame(csv, face_dir, seven_races=False, drop_race=drop_race)
             train_loader_minority, _ = make_datasets(frames_minority['train'], frames_minority['val'], True, batch_size, col_used)
@@ -151,11 +153,14 @@ def experiment(args):
     elif dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA']:
         print('이미지 가독성 검사를 건너뜁니다 (--skip_readable_check).')
 
-    # 민감그룹 수를 전역(config)으로 전달 (gender=2, UTKFace race=4)
+    # 민감그룹 수를 전역(config)으로 전달 (gender=2, UTKFace race=4, drop_race 3 4 → 2)
+    # len(set) 대신 max+1: drop_race로 중간 번호가 비어도(예: {0,1,3}) 그룹 id 범위가 어긋나지 않게.
+    # 빈 그룹은 φ/EO 집계에서 표본 0으로 자동 스킵된다.
     if sensitive_group in frames['train'].columns:
-        n_sensitive_groups = len(set(frames['train'][sensitive_group]))
+        n_sensitive_groups = int(frames['train'][sensitive_group].max()) + 1
         config.glo_n_groups = n_sensitive_groups
-        print(f"민감그룹 '{sensitive_group}' 그룹 수: {n_sensitive_groups}")
+        print(f"민감그룹 '{sensitive_group}' 그룹 수: {n_sensitive_groups} "
+              f"(실제 존재 그룹: {sorted(set(frames['train'][sensitive_group]))})")
 
     lr_schedule = [1e-4, 1e-5, 1e-6]
     # 여기서 make_datasets 호출 시 shuffle=True로 되어 있음
@@ -191,7 +196,8 @@ def experiment(args):
             target_col, num_classes = len(col_used_training) - 1, total_classes
             samples_per_class = 10 if dataset != "Imagenet" else 2
         if drop_race and loss_type == 'race':
-            num_classes = num_classes - 1 if drop_race < 10 else 1
+            drops = drop_race if isinstance(drop_race, (list, tuple)) else [drop_race]
+            num_classes = num_classes - len(drops) if all(d < 10 for d in drops) else 1
         prune_cfgs = [prune_rate, target_col, num_classes, samples_per_class]
     elif prune_type == "FairGRAPE" or prune_type == "Importance":
         sensitive_classes = len(set(frames['train'][sensitive_group]))
@@ -696,7 +702,7 @@ if __name__ == "__main__":
     parser.add_argument('--stop_batch', type=int, default=10000, help='중요도 계산에 사용할 미니배치의 최대 개수')
     parser.add_argument('--exp_idx', type=int, default=0, help='여러 실험을 구분하기 위한 인덱스')
     parser.add_argument('--no_init_train', action='store_true', help='초기 학습 과정을 생략할지 여부')
-    parser.add_argument('--drop_race', type=int, default=0, help='특정 인종(race) 데이터를 드롭할지 여부 (1이면 드롭, 0이면 미사용)')
+    parser.add_argument('--drop_race', type=int, nargs='*', default=0, help='제거할 인종 번호(1~4=White/Black/Asian/Indian, 11~14=해당 인종만 유지). 여러 개 지정 가능: --drop_race 3 4')
     parser.add_argument('--no_retrain', action='store_true', help='가지치기 후 재학습 과정을 생략할지 여부')
     parser.add_argument('--save_mask', action='store_true', help='가지치기 마스크를 .npy 파일 형태로 저장할지 여부')
     parser.add_argument('--print_acc', action='store_true', help='가지치기 및 파인튜닝 후 테스트 정확도를 표시할지 여부')

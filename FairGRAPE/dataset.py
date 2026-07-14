@@ -115,17 +115,17 @@ def relabel(frame, seven_races=True, drop_race=False):
         #frame = frame[frame['race'] != 3]
         Counter(frame.race)
         
-    # drop_race 파라미터의 동작:
+    # drop_race 파라미터의 동작 (int 하나 또는 리스트 허용):
     # =0: 아무것도 안 함
-    # =1/2/3/4: White/Black/Asian/Indian 제거
+    # =1/2/3/4: White/Black/Asian/Indian 제거 — 리스트로 여러 개 동시 제거 가능 (예: [3, 4] → Asian+Indian 제거)
     # =11/12/13/14: White/Black/Asian/Indian 만 남김
     if drop_race and 'race' in frame.columns:
-        if drop_race in [1, 2, 3, 4]:
-            drop_race -= 1
-            frame = frame[frame['race'] != drop_race].reset_index(drop=True)
-        elif drop_race in [11, 12, 13, 14]:
-            drop_race -= 11
-            frame = frame[frame['race'] == drop_race].reset_index(drop=True)
+        drops = list(drop_race) if isinstance(drop_race, (list, tuple)) else [drop_race]
+        for dr in drops:
+            if dr in [1, 2, 3, 4]:
+                frame = frame[frame['race'] != dr - 1].reset_index(drop=True)
+            elif dr in [11, 12, 13, 14]:
+                frame = frame[frame['race'] == dr - 11].reset_index(drop=True)
 
     # race와 gender가 모두 있으면, raceAndgender 라벨 생성
     if 'race' in frame.columns and 'gender' in frame.columns:
