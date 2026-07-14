@@ -557,21 +557,21 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     f.write(output_text)
                 print(f"[출력 저장] {file_path}")
 
-                #! 모델 저장
-                model_save_dir = 'save_models'  # 별도의 모델 저장 폴더
-                if not os.path.exists(model_save_dir):
-                    os.makedirs(model_save_dir, exist_ok=True)
-                
-                model_filename = f"save_model_prune: {config.glo_prune_iter + 1}_retrain: {epoch + 1}_{timestamp}.pt"
-                model_path = os.path.join(model_save_dir, model_filename)
-                
-                torch.save({
-                    'model_state_dict': training_model.state_dict(), # 🔥 수정됨 (Wrapper 포함 저장)
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch,
-                }, os.path.join(model_save_dir, model_filename))
-                
-                print(f"[모델 저장] {model_path}")
+                #! 모델 저장 (save_models/ 저장 비활성화)
+                # model_save_dir = 'save_models'  # 별도의 모델 저장 폴더
+                # if not os.path.exists(model_save_dir):
+                #     os.makedirs(model_save_dir, exist_ok=True)
+                #
+                # model_filename = f"save_model_prune: {config.glo_prune_iter + 1}_retrain: {epoch + 1}_{timestamp}.pt"
+                # model_path = os.path.join(model_save_dir, model_filename)
+                #
+                # torch.save({
+                #     'model_state_dict': training_model.state_dict(), # 🔥 수정됨 (Wrapper 포함 저장)
+                #     'optimizer_state_dict': optimizer.state_dict(),
+                #     'epoch': epoch,
+                # }, os.path.join(model_save_dir, model_filename))
+                #
+                # print(f"[모델 저장] {model_path}")
 
         if hook_handle is not None:
             hook_handle.remove()
@@ -682,23 +682,23 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     
     print(f"\n🏆 [베스트 모델 요약 저장] {best_model_path}")
     
-    # 🔥 베스트 모델 가중치도 별도 저장
-    best_model_weights_dir = 'save_models'
-    if not os.path.exists(best_model_weights_dir):
-        os.makedirs(best_model_weights_dir, exist_ok=True)
-    
-    best_weights_filename = f"BEST_MODEL_prune_{config.glo_prune_iter + 1}_acc_{best_acc:.4f}_eo_{best_eo:.4f}_{timestamp}.pt"
-    best_weights_path = os.path.join(best_model_weights_dir, best_weights_filename)
-    
-    torch.save({
-        'model_state_dict': best_model_wts,
-        'optimizer_state_dict': best_optimizer_state,
-        'grl_enabled': use_grl,
-        'alpha': alpha,
-        'seed': seed,
-    }, best_weights_path)
-    
-    print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")
+    # 🔥 베스트 모델 가중치도 별도 저장 (save_models/ 저장 비활성화)
+    # best_model_weights_dir = 'save_models'
+    # if not os.path.exists(best_model_weights_dir):
+    #     os.makedirs(best_model_weights_dir, exist_ok=True)
+    #
+    # best_weights_filename = f"BEST_MODEL_prune_{config.glo_prune_iter + 1}_acc_{best_acc:.4f}_eo_{best_eo:.4f}_{timestamp}.pt"
+    # best_weights_path = os.path.join(best_model_weights_dir, best_weights_filename)
+    #
+    # torch.save({
+    #     'model_state_dict': best_model_wts,
+    #     'optimizer_state_dict': best_optimizer_state,
+    #     'grl_enabled': use_grl,
+    #     'alpha': alpha,
+    #     'seed': seed,
+    # }, best_weights_path)
+    #
+    # print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")
 
     # 🔥 Debiasing 모드면 원래 모델 반환
     torch.backends.cudnn.enabled = prev_cudnn_enabled
