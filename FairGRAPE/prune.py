@@ -30,10 +30,15 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
 IMPT_TYPE2_ALPHA = 0.5
+IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정성 혼합 가중치. 직접 수정하면 됨.
+# impt_type=3 정규화 방식. 'rank': 블록 내 활성 가중치의 순위 백분위(0~1) — perf/φ 분포 모양과
+# 무관하게 같은 스케일이 되어 alpha가 실제 혼합 비율로 작동. 'max': 기존 블록 max 나눗셈
+# (perf가 제곱 heavy-tail이라 벌크가 0으로 붕괴 → alpha<1에서 φ 단독 지배 문제 있음).
+IMPT3_NORM = 'rank'
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
-IMPT2_KEEP_PER_ITER = 0.975  # impt_type=2: 매 iteration마다 유지할 채널 가중치 비율
-IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03  # impt_type=2: 각 레이어가 원본 채널의 최소 10%는 유지
-IMPT2_PROTECTION_RATIO = 0.005  # impt_type=2: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
+# IMPT2_KEEP_PER_ITER = 0.975  # → 명령어 인자 --keep_per_iter (config.glo_keep_per_iter)로 대체됨. 이 값을 바꿔도 반영 안 됨.
+IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03  # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 3%는 유지
+IMPT2_PROTECTION_RATIO = 0.005  # impt_type=2/3: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
 
 
 forward_mapping_dict = {
@@ -93,7 +98,8 @@ class Prunner:
         masks = self.get_mask(prune_cfgs) # 마스크 생성
         if self.save_mask: # 마스크 저장(옵션)
             print("마스크 타입:", type(masks), "첫 번째 마스크 타입:", type(masks[0]))
-            mask_np = np.array([m.cpu().numpy() for m in masks])
+            # 레이어별 shape이 달라 ragged array가 됨 → numpy>=1.24는 dtype=object 명시 필요
+            mask_np = np.array([m.cpu().numpy() for m in masks], dtype=object)
             np.save("mask.npy",mask_np)
             del mask_np
         self.apply_hook(masks) # 마스크 레이어에 적용
@@ -507,6 +513,8 @@ class FairGRAPE(Prunner):
         
         if impt_type == 2:
             print("alpha:", IMPT_TYPE2_ALPHA, "| gamma:", IMPT2_PROTECTION_RATIO)
+        elif impt_type == 3:
+            print("alpha:", IMPT_TYPE3_ALPHA, "| gamma:", IMPT2_PROTECTION_RATIO)
         else:
             print("alpha:", IMPT_TYPE1_ALPHA)
 
@@ -1432,7 +1440,125 @@ def _build_channel_mask_list(model, selected_channels, device):
     return mask_list
 
 
-def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'], stop_batch=10000, masked_grads=True, sensitive_group=None):
+def _rank_percentile(values: torch.Tensor) -> torch.Tensor:
+    """1-D 텐서를 순위 백분위(0~1)로 변환. 최솟값→0, 최댓값→1.
+    분포 모양(heavy-tail 등)과 무관하게 균등분포가 되므로 서로 다른
+    점수(perf/φ)를 같은 스케일에서 혼합할 수 있다. 동점은 등장 순서로 갈린다."""
+    n = values.numel()
+    if n <= 1:
+        return torch.full_like(values, 0.5)
+    order = torch.argsort(values)
+    ranks = torch.empty(n, dtype=torch.long, device=values.device)
+    ranks[order] = torch.arange(n, device=values.device)
+    return ranks.to(values.dtype) / (n - 1)
+
+
+def _build_weight_mask_list(model, selected_by_layer, device):
+    """impt_type=3: 가중치 단위 마스크 생성.
+    selected_by_layer: {layer_name: 제거할 weight의 flat index LongTensor}
+    기존 마스크를 유지(누적)하면서 선택된 좌표만 0으로 만든다.
+    반환 순서는 _build_channel_mask_list와 동일 (named_modules 순)."""
+    mask_by_layer = {}
+    for name, layer in model.named_modules():
+        if type(layer).__name__ not in supported_layers or not hasattr(layer, 'weight'):
+            continue
+        if hasattr(layer, 'mask') and layer.mask.shape == layer.weight.shape:
+            mask_by_layer[name] = layer.mask.detach().clone().long()
+        else:
+            mask_by_layer[name] = torch.ones_like(layer.weight, dtype=torch.long)
+
+    total_selected = 0
+    for name, flat_indices in selected_by_layer.items():
+        if name not in mask_by_layer or flat_indices is None or flat_indices.numel() == 0:
+            continue
+        flat_mask = mask_by_layer[name].view(-1)
+        flat_mask[flat_indices.to(flat_mask.device)] = 0
+        total_selected += int(flat_indices.numel())
+
+    mask_list = [mask.to(device) for _, mask in mask_by_layer.items()]
+    print(f"weight mask 생성 완료: 선택 가중치={total_selected}, 총 레이어={len(mask_list)}")
+    return mask_list
+
+
+def _save_weight_pruning_log(
+    per_layer_stats,
+    accum_removed,
+    remove_target,
+    prune_iter,
+    alpha,
+    gamma=None,
+    total_model_params=None,
+    total_active_after=None,
+    model_sparsity=None,
+    worst_selected=None,
+    norm=None,
+    log_dir='/workspace/FairGRAPE/FairGRAPE/weight_pruning_logs',
+):
+    """impt_type=3 가중치 pruning 로그. channel_pruning_logs와 동형 포맷.
+    per_layer_stats: [{'name', 'numel', 'active_before', 'protected', 'eligible', 'removed',
+                       (선택) 'removed_phi_med', 'removed_perf_med'} ...]
+    worst_selected: [(score, layer_name, flat_idx) ...] 점수 낮은 순 샘플."""
+    import datetime
+    os.makedirs(log_dir, exist_ok=True)
+
+    norm_tag = f"_{norm}" if norm else ""
+    filename = f"alpha{alpha:.1f}{norm_tag}_iter{prune_iter + 1:02d}.txt"
+    filepath = os.path.join(log_dir, filename)
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("Weight Pruning Log (impt_type=3)\n")
+        f.write(f"  iteration  : {prune_iter + 1}\n")
+        f.write(f"  alpha      : {alpha:.4f}\n")
+        f.write(f"  timestamp  : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"  remove_target  : {remove_target}\n")
+        f.write(f"  accum_removed  : {accum_removed}\n")
+        if norm is not None:
+            f.write(f"  norm           : {norm}\n")
+        if gamma is not None:
+            f.write(f"  gamma          : {gamma:.4f}\n")
+        f.write(f"  remove_target_met : {'yes' if accum_removed >= remove_target else 'NO (γ/floor 제약)'}\n")
+        if model_sparsity is not None:
+            f.write(f"  total_params   : {total_model_params}\n")
+            f.write(f"  active_after   : {total_active_after}\n")
+            f.write(f"  model_sparsity : {model_sparsity*100:.1f}%\n")
+        f.write("=" * 80 + "\n\n")
+
+        f.write("[ 레이어별 가중치 제거 현황 ]\n")
+        f.write("  (rm_phi/rm_perf: 이번 iter 제거 가중치들의 정규화 φ/perf 중앙값. rank 모드면 백분위 —\n")
+        f.write("   rm_perf가 낮으면 perf-주도 제거(안전), rm_phi만 높으면 φ-주도 제거(위험))\n")
+        f.write(
+            f"  {'layer':<30} {'numel':>9} {'active':>9} {'protect':>8} "
+            f"{'removed':>8} {'cumul':>9} {'cumul_%':>8} {'rm_phi':>7} {'rm_perf':>8}\n"
+        )
+        f.write("  " + "-" * 102 + "\n")
+        for stat in per_layer_stats:
+            numel = stat['numel']
+            active_before = stat['active_before']
+            removed = stat['removed']
+            cumul_after = (numel - active_before) + removed
+            ratio = cumul_after / numel * 100 if numel > 0 else 0.0
+            phi_med = stat.get('removed_phi_med')
+            perf_med = stat.get('removed_perf_med')
+            phi_str = f"{phi_med:.3f}" if phi_med is not None else "-"
+            perf_str = f"{perf_med:.3f}" if perf_med is not None else "-"
+            f.write(
+                f"  {stat['name']:<30} {numel:>9} {active_before:>9} {stat['protected']:>8} "
+                f"{removed:>8} {cumul_after:>9} {ratio:>7.1f}% {phi_str:>7} {perf_str:>8}\n"
+            )
+        f.write("\n")
+
+        if worst_selected:
+            f.write("[ 제거 점수 하위 샘플 (score 오름차순) ]\n")
+            f.write(f"{'layer':<30} {'flat_idx':>10} {'score':>14}\n")
+            f.write("-" * 60 + "\n")
+            for score, layer_name, flat_idx in worst_selected:
+                f.write(f"{layer_name:<30} {flat_idx:>10} {score:>14.6e}\n")
+
+    print(f"[가중치 pruning 로그 저장] {filepath}")
+
+
+def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'], stop_batch=10000, masked_grads=True, sensitive_group=None, collect_block_weight_grads=False):
     del masked_grads
     print("-------------compute_phi_k-------------")
 
@@ -1455,6 +1581,19 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
     weight_phi_target_names = ['features.0.0']  # classifier.1은 features.18 phi 재사용
     weight_grad_sums = {}
     weight_grad_counts = defaultdict(int)
+
+    # weight gradient 누적 대상. impt_type=3(가중치 단위 pruning)에서는
+    # blocks features.1~17의 conv0/conv1/conv2 weight-grad도 함께 누적한다.
+    weight_grad_target_names = ['features.0.0', 'classifier.1']
+    if collect_block_weight_grads:
+        for _block_num in range(1, 18):
+            for _conv_name in _get_impt_type2_block_layer_names(f'features.{_block_num}'):
+                if _conv_name is None:
+                    continue
+                _layer = modules_dict.get(_conv_name)
+                if _layer is not None and hasattr(_layer, 'weight'):
+                    weight_grad_target_names.append(_conv_name)
+        print(f"impt_type == 3: block weight-grad 누적 대상 {len(weight_grad_target_names) - 2}개 레이어")
     # features.0.0의 activation gap 누적 (channel-level과 동일 방식)
     f0_gap_y0_sums = {}
     f0_gap_y0_counts = defaultdict(int)
@@ -1609,8 +1748,8 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
                         f0_gap_y1_sums['features.0.0'] = f0_gap_y1_sums.get('features.0.0', torch.zeros_like(gap_y1)) + gap_y1
                         f0_gap_y1_counts['features.0.0'] += 1
 
-            # features.0.0, classifier.1 weight gradient 누적
-            for wname in ['features.0.0', 'classifier.1']:
+            # features.0.0, classifier.1 (+impt3: block conv들) weight gradient 누적
+            for wname in weight_grad_target_names:
                 if wname not in modules_dict:
                     continue
                 wlayer = modules_dict[wname]
@@ -1649,6 +1788,7 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
         return torch.stack(gaps, dim=0).mean(dim=0), len(gaps)
 
     phi_by_layer = {}
+    gap_by_layer = {}  # impt_type=3용: gradient를 곱하기 전의 raw activation gap (채널 단위, float64)
     print("phi 레이어별 요약:")
     for layer_name, layer in target_layers.items():
         num_channels = int(layer.weight.shape[0])
@@ -1658,6 +1798,7 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
         gap_y1, n_attr_y1 = _pooled_group_gap(layer_name, 1, zero_vec)
 
         activation_gap = gap_y0 + gap_y1
+        gap_by_layer[layer_name] = activation_gap.clone()
         mean_gradient = mean_grad_sums.get(layer_name, zero_vec)
         if mean_grad_counts[layer_name] > 0:
             mean_gradient = mean_gradient / mean_grad_counts[layer_name]
@@ -1704,7 +1845,17 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
         phi_weight_by_layer['classifier.1'] = phi_w_cls.to(torch.float32)
         print(f"  ✓ classifier.1: shape={tuple(phi_w_cls.shape)}, phi_mean={phi_w_cls.mean().item():.6e}")
 
-    return phi_by_layer, phi_weight_by_layer
+    # impt_type=3용: block conv들의 배치 평균 |weight.grad| (weight와 같은 shape, float64)
+    block_wgrad_by_layer = {}
+    if collect_block_weight_grads:
+        for wname in weight_grad_target_names:
+            if wname in ('features.0.0', 'classifier.1'):
+                continue
+            if wname in weight_grad_sums and weight_grad_counts[wname] > 0:
+                block_wgrad_by_layer[wname] = weight_grad_sums[wname] / weight_grad_counts[wname]
+        print(f"block weight-grad 평균 완료: {len(block_wgrad_by_layer)}개 레이어")
+
+    return phi_by_layer, phi_weight_by_layer, gap_by_layer, block_wgrad_by_layer
 
 
 def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_classes = 2, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)],col_names=['race','gender'], para_batch=1, impt_type = 0, stop_batch=10000, delta_p=False,n_jobs=1, network=None, sensitive_group=None):
@@ -1902,9 +2053,16 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"impt_type == 2 의 alpha는 0과 1 사이여야 합니다. 현재 값: {alpha}")
 
-        print(f"impt_type == 2: alpha={alpha:.4f}로 채널 단위 fairness-aware pruning 시작")
+        # iter당 유지율: CLI --keep_per_iter (config.glo_keep_per_iter)로 전달됨.
+        # main_test 경유 시 항상 CLI 값이 설정되므로, 아래 폴백(0.975)은 직접 호출 시에만 쓰인다.
+        keep_per_iter = getattr(config, 'glo_keep_per_iter', None)
+        keep_per_iter = float(keep_per_iter) if keep_per_iter is not None else 0.975
+        if not 0.0 < keep_per_iter <= 1.0:
+            raise ValueError(f"keep_per_iter는 0 초과 1 이하여야 합니다. 현재: {keep_per_iter}")
 
-        phi_by_layer, phi_weight_by_layer = compute_phi_k(
+        print(f"impt_type == 2: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}로 채널 단위 fairness-aware pruning 시작")
+
+        phi_by_layer, phi_weight_by_layer, _, _ = compute_phi_k(
             model,
             test_csv,
             new_img_dir=new_img_dir,
@@ -2026,12 +2184,12 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         )
         # 전체 활성 가중치 (γ=0% 옵션 3과 동일한 sparsity 진행 속도 유지)
         total_active_channel_weights = candidate_channel_weights + protected_channel_weights
-        remove_target = int(round(total_active_channel_weights * (1.0 - IMPT2_KEEP_PER_ITER)))
+        remove_target = int(round(total_active_channel_weights * (1.0 - keep_per_iter)))
 
         print(
             f"impt_type == 2 제거량 계산: total_active={total_active_channel_weights} "
             f"(candidate={candidate_channel_weights}, protected={protected_channel_weights}), "
-            f"keep_per_iter={IMPT2_KEEP_PER_ITER}, remove_target={remove_target}, "
+            f"keep_per_iter={keep_per_iter}, remove_target={remove_target}, "
             f"candidates={len(score_by_channel)}"
         )
 
@@ -2152,6 +2310,332 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         # 최종 마스크 리스트 반환 (layer 순서 유지)
         final_mask_list = [mask_by_name[name].to(device) for name in layer_order if name in mask_by_name]
         return final_mask_list
+
+    if impt_type == 3:
+        # ── impt_type == 3: 가중치 단위 fairness-aware pruning ──
+        # impt_type == 2와 신호(activation gap, importance)·제거량(keep_per_iter)·
+        # 제약(γ 보호, 레이어 최소 유지)은 동일하게 두고, 제거 단위만 채널 묶음 → 가중치 1개로 바꾼 버전.
+        #   φ_w[i,j,h,w] = gap[k(w)] × mean|∂L/∂W[i,j,h,w]|   (k(w): 가중치가 속한 확장 채널)
+        #   perf_w      = Σ_batch (|W|·|∂L/∂W|)²              (채널 집계 없이 가중치별 그대로)
+        #   score_w     = α·scale(perf_w) − (1−α)·scale(φ_w)  (scale: IMPT3_NORM에 따라
+        #                 블록 내 순위 백분위('rank') 또는 블록 max 나눗셈('max'))
+        alpha = float(IMPT_TYPE3_ALPHA)
+        import config
+        config.glo_imp_rate = alpha
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"impt_type == 3 의 alpha는 0과 1 사이여야 합니다. 현재 값: {alpha}")
+
+        keep_per_iter = getattr(config, 'glo_keep_per_iter', None)
+        keep_per_iter = float(keep_per_iter) if keep_per_iter is not None else 0.975
+        if not 0.0 < keep_per_iter <= 1.0:
+            raise ValueError(f"keep_per_iter는 0 초과 1 이하여야 합니다. 현재: {keep_per_iter}")
+
+        norm_mode = str(IMPT3_NORM)
+        if norm_mode not in ('rank', 'max'):
+            raise ValueError(f"IMPT3_NORM은 'rank' 또는 'max' 여야 합니다. 현재: {norm_mode}")
+
+        print(f"impt_type == 3: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={norm_mode}로 가중치 단위 fairness-aware pruning 시작")
+
+        _, _, gap_by_layer, block_wgrad_by_layer = compute_phi_k(
+            model,
+            test_csv,
+            new_img_dir=new_img_dir,
+            output_cols_each_task=output_cols_each_task,
+            col_names=col_names,
+            stop_batch=stop_batch,
+            masked_grads=masked_grads,
+            sensitive_group=sensitive_group,
+            collect_block_weight_grads=True,
+        )
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        importance_score_all, _ = compute_importance(
+            model,
+            None,
+            test_csv,
+            new_img_dir=new_img_dir,
+            masked_grads=masked_grads,
+            output_cols_each_task=output_cols_each_task,
+            col_names=col_names,
+            stop_batch=stop_batch,
+            network=network,
+            sensitive_group=sensitive_group,
+            sensitive_classes=sensitive_classes,
+            imp_batch_size=IMPT_TYPE2_IMPORTANCE_BATCH_SIZE,
+        )
+
+        modules = dict(model.named_modules())
+        import math as _math
+
+        # ── 블록별 φ_w / perf_w 계산 + 정규화(rank/max) → 가중치별 score ──
+        # gap은 확장 채널 k 단위이므로, 각 conv 가중치의 "소속 채널 축"으로 브로드캐스트:
+        #   conv0(expand)/conv1(dw): 출력 채널(dim 0), conv2(project): 입력 채널(dim 1)
+        score_by_layer = {}         # conv_name -> [weight.shape] float32 CPU
+        perf_w_by_layer = {}        # conv_name -> perf raw float32 CPU (γ 보호 판정용)
+        phi_scaled_by_layer = {}    # conv_name -> 정규화된 φ float32 CPU (진단 로그용)
+        perf_scaled_by_layer = {}   # conv_name -> 정규화된 perf float32 CPU (진단 로그용)
+        for block_num in range(1, 18):
+            block_name = f'features.{block_num}'
+            conv0_name, conv1_name, conv2_name = _get_impt_type2_block_layer_names(block_name)
+            ref_name = conv1_name if conv1_name is not None else conv0_name
+            gap = gap_by_layer.get(ref_name)
+            if gap is None:
+                print(f"  - {block_name}: gap 없음, 스킵")
+                continue
+
+            phi_parts = {}
+            perf_parts = {}
+            for conv_name, ch_dim in [(conv0_name, 0), (conv1_name, 0), (conv2_name, 1)]:
+                if conv_name is None or conv_name not in modules:
+                    continue
+                wgrad = block_wgrad_by_layer.get(conv_name)
+                perf = importance_score_all.get(conv_name)
+                if wgrad is None or perf is None:
+                    print(f"  - {conv_name}: wgrad/perf 없음, 스킵")
+                    continue
+                if perf.shape != wgrad.shape or wgrad.shape[ch_dim] != gap.shape[0]:
+                    print(
+                        f"  - {conv_name}: shape mismatch wgrad={tuple(wgrad.shape)} "
+                        f"perf={tuple(perf.shape)} gap={tuple(gap.shape)} (ch_dim={ch_dim}), 스킵"
+                    )
+                    continue
+                view_shape = [1] * wgrad.ndim
+                view_shape[ch_dim] = -1
+                gap_broadcast = gap.view(*view_shape).to(wgrad.device)
+                phi_parts[conv_name] = torch.nan_to_num(
+                    gap_broadcast * wgrad, nan=0.0, posinf=0.0, neginf=0.0
+                )
+                perf_parts[conv_name] = torch.nan_to_num(
+                    perf.to(torch.float64), nan=0.0, posinf=0.0, neginf=0.0
+                )
+
+            if not phi_parts:
+                continue
+
+            # 정규화 단위는 블록 (conv0+conv1+conv2 공통) — impt_type == 2와 동일한 단위
+            if norm_mode == 'rank':
+                # 블록 내 '활성' 가중치 전체를 한 줄로 모아 순위 백분위(0~1)로 정규화.
+                # perf(제곱 heavy-tail)와 φ가 같은 균등 스케일이 되어 alpha가 실제 혼합 비율로 작동.
+                # 비활성(이미 프루닝된) 가중치는 순위 계산에서 제외 (후보에서도 제외되므로 값 무관).
+                active_by_conv = {}
+                phi_cat, perf_cat = [], []
+                for conv_name in phi_parts:
+                    layer = modules[conv_name]
+                    if hasattr(layer, 'mask') and layer.mask.shape == layer.weight.shape:
+                        act = (layer.mask.detach().view(-1) > 0).to(phi_parts[conv_name].device)
+                    else:
+                        act = torch.ones(
+                            layer.weight.numel(), dtype=torch.bool,
+                            device=phi_parts[conv_name].device,
+                        )
+                    active_by_conv[conv_name] = act
+                    phi_cat.append(phi_parts[conv_name].view(-1)[act])
+                    perf_cat.append(perf_parts[conv_name].view(-1)[act])
+
+                phi_pct = _rank_percentile(torch.cat(phi_cat))
+                perf_pct = _rank_percentile(torch.cat(perf_cat))
+
+                offset = 0
+                for conv_name in phi_parts:
+                    act = active_by_conv[conv_name]
+                    n_act = int(act.sum().item())
+                    phi_scaled = torch.zeros_like(phi_parts[conv_name]).view(-1)
+                    perf_scaled = torch.zeros_like(perf_parts[conv_name]).view(-1)
+                    phi_scaled[act] = phi_pct[offset:offset + n_act]
+                    perf_scaled[act] = perf_pct[offset:offset + n_act]
+                    offset += n_act
+                    phi_scaled = phi_scaled.view(phi_parts[conv_name].shape)
+                    perf_scaled = perf_scaled.view(perf_parts[conv_name].shape)
+
+                    combined = (alpha * perf_scaled) - ((1.0 - alpha) * phi_scaled)
+                    score_by_layer[conv_name] = torch.nan_to_num(
+                        combined, nan=0.0, posinf=0.0, neginf=0.0
+                    ).to(torch.float32).cpu()
+                    perf_w_by_layer[conv_name] = perf_parts[conv_name].to(torch.float32).cpu()
+                    phi_scaled_by_layer[conv_name] = phi_scaled.to(torch.float32).cpu()
+                    perf_scaled_by_layer[conv_name] = perf_scaled.to(torch.float32).cpu()
+            else:  # 'max': 기존 블록 max 나눗셈
+                phi_max = max(float(p.max().item()) for p in phi_parts.values())
+                perf_max = max(float(p.max().item()) for p in perf_parts.values())
+                for conv_name in phi_parts:
+                    phi_scaled = phi_parts[conv_name] / (phi_max + 1e-12)
+                    perf_scaled = perf_parts[conv_name] / (perf_max + 1e-12)
+                    combined = (alpha * perf_scaled) - ((1.0 - alpha) * phi_scaled)
+                    score_by_layer[conv_name] = torch.nan_to_num(
+                        combined, nan=0.0, posinf=0.0, neginf=0.0
+                    ).to(torch.float32).cpu()
+                    perf_w_by_layer[conv_name] = perf_parts[conv_name].to(torch.float32).cpu()
+                    phi_scaled_by_layer[conv_name] = phi_scaled.to(torch.float32).cpu()
+                    perf_scaled_by_layer[conv_name] = perf_scaled.to(torch.float32).cpu()
+
+        if not score_by_layer:
+            print("impt_type == 3: 제거 가능한 가중치 점수를 만들지 못해 기존 마스크를 그대로 반환합니다.")
+            return _build_weight_mask_list(model, {}, device)
+
+        # ── 레이어별 후보 선별: 활성(mask=1) ∧ γ 보호 제외 ∧ 최소 유지(floor) 이내 ──
+        gamma = float(IMPT2_PROTECTION_RATIO)
+        if not 0.0 <= gamma <= 1.0:
+            raise ValueError(f"IMPT2_PROTECTION_RATIO는 0~1 사이여야 합니다. 현재: {gamma}")
+        print(f"impt_type == 3: protection_ratio (γ)={gamma:.4f} 적용 — 각 레이어 perf 상위 γ% 가중치 보호")
+
+        layer_names_order = []   # layer_id -> conv_name
+        eligible_scores = []     # 레이어별 eligible 가중치 점수 텐서
+        eligible_layer_ids = []
+        eligible_flat_idx = []
+        per_layer_stats = []
+        total_active = 0
+
+        for conv_name, score in score_by_layer.items():
+            layer = modules[conv_name]
+            numel = int(layer.weight.numel())
+            if hasattr(layer, 'mask') and layer.mask.shape == layer.weight.shape:
+                active_flat = (layer.mask.detach().view(-1) > 0).cpu()
+            else:
+                active_flat = torch.ones(numel, dtype=torch.bool)
+
+            score_flat = score.view(-1)
+            perf_flat = perf_w_by_layer[conv_name].view(-1)
+            active_idx = torch.nonzero(active_flat, as_tuple=False).view(-1)
+            n_active = int(active_idx.numel())
+            total_active += n_active
+
+            stat = {
+                'name': conv_name,
+                'numel': numel,
+                'active_before': n_active,
+                'protected': 0,
+                'eligible': 0,
+                'removed': 0,
+            }
+
+            if n_active == 0:
+                per_layer_stats.append(stat)
+                continue
+
+            # γ 보호: 활성 가중치 중 perf 상위 ceil(n_active·γ)개 제외
+            n_protect = int(_math.ceil(n_active * gamma)) if gamma > 0.0 else 0
+            n_protect = min(n_protect, n_active)
+            protected_flag = torch.zeros(n_active, dtype=torch.bool)
+            if n_protect > 0:
+                prot_local = torch.topk(perf_flat[active_idx], n_protect, largest=True).indices
+                protected_flag[prot_local] = True
+            stat['protected'] = n_protect
+
+            candidate_idx = active_idx[~protected_flag]
+            if candidate_idx.numel() == 0:
+                per_layer_stats.append(stat)
+                continue
+
+            # 레이어 최소 유지: 이번 iter 제거 후에도 active ≥ ceil(numel × 최소비율)
+            min_keep = int(_math.ceil(numel * IMPT2_MIN_KEEP_RATIO_PER_LAYER))
+            removable_cap = max(0, n_active - min_keep)
+            k_eligible = min(removable_cap, int(candidate_idx.numel()))
+            if k_eligible <= 0:
+                per_layer_stats.append(stat)
+                continue
+
+            # 후보 중 점수 하위 k_eligible개만 이번 iter 제거 가능 (floor 사전 반영)
+            elig = torch.topk(score_flat[candidate_idx], k_eligible, largest=False)
+            stat['eligible'] = k_eligible
+            layer_id = len(layer_names_order)
+            layer_names_order.append(conv_name)
+            eligible_scores.append(elig.values)
+            eligible_flat_idx.append(candidate_idx[elig.indices])
+            eligible_layer_ids.append(torch.full((k_eligible,), layer_id, dtype=torch.long))
+            per_layer_stats.append(stat)
+
+        # ── remove_target: 전체 활성 가중치(보호 포함)의 (1-keep_per_iter) — impt2와 동일 진행 속도 ──
+        remove_target = int(round(total_active * (1.0 - keep_per_iter)))
+        n_eligible_total = int(sum(int(t.numel()) for t in eligible_scores))
+        print(
+            f"impt_type == 3 제거량 계산: total_active={total_active}, "
+            f"keep_per_iter={keep_per_iter}, remove_target={remove_target}, "
+            f"eligible={n_eligible_total}"
+        )
+
+        # ── 전역(global) 점수 오름차순으로 remove_target개 가중치 선택 ──
+        selected_by_layer = {}
+        accum_removed = 0
+        worst_selected = []
+        if remove_target > 0 and eligible_scores:
+            all_scores = torch.cat(eligible_scores)
+            all_layer_ids = torch.cat(eligible_layer_ids)
+            all_flat_idx = torch.cat(eligible_flat_idx)
+            k_select = min(remove_target, int(all_scores.numel()))
+            sel = torch.topk(all_scores, k_select, largest=False)
+            sel_layer_ids = all_layer_ids[sel.indices]
+            sel_flat_idx = all_flat_idx[sel.indices]
+            accum_removed = int(k_select)
+
+            for layer_id, conv_name in enumerate(layer_names_order):
+                pick = sel_layer_ids == layer_id
+                n_pick = int(pick.sum().item())
+                if n_pick == 0:
+                    continue
+                selected_by_layer[conv_name] = sel_flat_idx[pick]
+                per_layer_stats[[s['name'] for s in per_layer_stats].index(conv_name)]['removed'] = n_pick
+
+            # 로그용: 점수 하위 20개 샘플 (topk largest=False는 오름차순 정렬 반환)
+            for i in range(min(20, k_select)):
+                worst_selected.append((
+                    float(sel.values[i].item()),
+                    layer_names_order[int(sel_layer_ids[i].item())],
+                    int(sel_flat_idx[i].item()),
+                ))
+
+        # 진단: 레이어별 제거 가중치들의 정규화 φ/perf 중앙값 (rank 모드면 백분위).
+        # perf 중앙값이 낮고 φ 중앙값이 높으면 φ-주도 제거(위험 신호), 반대면 perf-주도.
+        for stat in per_layer_stats:
+            sel_idx = selected_by_layer.get(stat['name'])
+            if sel_idx is not None and sel_idx.numel() > 0 and stat['name'] in phi_scaled_by_layer:
+                stat['removed_phi_med'] = float(
+                    phi_scaled_by_layer[stat['name']].view(-1)[sel_idx].median().item()
+                )
+                stat['removed_perf_med'] = float(
+                    perf_scaled_by_layer[stat['name']].view(-1)[sel_idx].median().item()
+                )
+
+        for stat in per_layer_stats:
+            if stat['removed'] > 0:
+                print(f"  [Global 선택] layer={stat['name']}, selected={stat['removed']}")
+
+        print(
+            f"impt_type == 3 가중치 선택 완료: selected={accum_removed}, "
+            f"remove_target={remove_target}"
+        )
+        if accum_removed < remove_target:
+            print(
+                f"⚠ remove_target 미달: γ={gamma:.2f} + floor 제약으로 "
+                f"removed={accum_removed} < target={remove_target}. 다음 iter로 진행."
+            )
+
+        # 전체 모델 sparsity 계산 (Conv2d + Linear 기준)
+        total_model_params = _count_total_weights(model)
+        total_active_after = _count_active_weights(model) - accum_removed
+        model_sparsity = 1.0 - (total_active_after / total_model_params)
+        print(f"모델 sparsity (Conv2d+Linear 기준, 이번 iter 후): {model_sparsity*100:.1f}%")
+
+        # ── 가중치 마스크 생성 및 로그 ──
+        mask_list = _build_weight_mask_list(model, selected_by_layer, device)
+
+        import config as _config
+        _save_weight_pruning_log(
+            per_layer_stats=per_layer_stats,
+            accum_removed=accum_removed,
+            remove_target=remove_target,
+            prune_iter=_config.glo_prune_iter,
+            alpha=alpha,
+            gamma=gamma,
+            total_model_params=total_model_params,
+            total_active_after=total_active_after,
+            model_sparsity=model_sparsity,
+            worst_selected=worst_selected,
+            norm=norm_mode,
+        )
+
+        return mask_list
 
     raise ValueError(f"지원하지 않는 impt_type 입니다: {impt_type}")
 

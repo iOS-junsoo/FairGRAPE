@@ -503,7 +503,7 @@ def main():
     print("\n[2/5] phi_k 계산 중 (compute_phi_k, 전체 39개 속성 합산)...")
     t0 = time.time()
     phi_model = copy.deepcopy(model)
-    phi_by_layer = compute_phi_k(
+    phi_result = compute_phi_k(
         phi_model,
         ctx["frame"],
         new_img_dir=ctx["face_dir"],
@@ -513,6 +513,8 @@ def main():
         masked_grads=True,
         sensitive_group="gender",
     )
+    # compute_phi_k는 (phi_by_layer, phi_weight_by_layer, gap_by_layer, block_wgrad_by_layer) 튜플 반환
+    phi_by_layer = phi_result[0] if isinstance(phi_result, tuple) else phi_result
     del phi_model
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

@@ -10,6 +10,66 @@ import numpy as np
 from util import make_model, save_model, save_output, download_dataset, show_acc_df, setseed, save_unpruned_model, print_acc_scores
 
 
+def _get_model_run_dir():
+    """save_models/<저장 시작 시각> 런 폴더를 반환. 프로세스당 한 번만 생성(config.glo_model_run_dir에 캐시).
+
+    폴더를 새로 만들 때 run_info.txt를 함께 기록한다:
+    - 이 런을 실행한 파이썬 명령어 (sys.argv 전체)
+    - impt_type과, 그에 따라 prune.py의 어떤 알파 변수가 어떤 값으로 적용되는지
+    """
+    import sys
+    import shlex
+    import config
+
+    run_dir = getattr(config, 'glo_model_run_dir', None)
+    if run_dir:
+        return run_dir
+
+    run_started = datetime.datetime.now()
+    run_dir = os.path.join('save_models', run_started.strftime("%Y%m%d_%H%M%S"))
+    os.makedirs(run_dir, exist_ok=True)
+
+    impt_type = getattr(config, 'glo_impt_type', None)
+
+    # impt_type → prune.py의 적용 알파 설명 (import 실패해도 저장 자체는 막지 않는다)
+    alpha_lines = []
+    try:
+        import prune as _prune
+        if impt_type == 1:
+            alpha_lines.append(f"적용 알파: IMPT_TYPE1_ALPHA = {_prune.IMPT_TYPE1_ALPHA}")
+        elif impt_type == 2:
+            alpha_lines.append(f"적용 알파: IMPT_TYPE2_ALPHA = {_prune.IMPT_TYPE2_ALPHA}")
+            alpha_lines.append(f"keep_per_iter(iter당 유지율): {getattr(config, 'glo_keep_per_iter', None)}")
+            alpha_lines.append(f"보호 비율 IMPT2_PROTECTION_RATIO(γ) = {_prune.IMPT2_PROTECTION_RATIO}")
+            alpha_lines.append(f"레이어 최소 유지 IMPT2_MIN_KEEP_RATIO_PER_LAYER = {_prune.IMPT2_MIN_KEEP_RATIO_PER_LAYER}")
+        elif impt_type == 3:
+            alpha_lines.append(f"적용 알파: IMPT_TYPE3_ALPHA = {_prune.IMPT_TYPE3_ALPHA}")
+            alpha_lines.append(f"정규화 방식 IMPT3_NORM = '{_prune.IMPT3_NORM}'")
+            alpha_lines.append(f"keep_per_iter(iter당 유지율): {getattr(config, 'glo_keep_per_iter', None)}")
+            alpha_lines.append(f"보호 비율 IMPT2_PROTECTION_RATIO(γ) = {_prune.IMPT2_PROTECTION_RATIO}")
+            alpha_lines.append(f"레이어 최소 유지 IMPT2_MIN_KEEP_RATIO_PER_LAYER = {_prune.IMPT2_MIN_KEEP_RATIO_PER_LAYER}")
+        else:
+            alpha_lines.append(f"적용 알파: 없음 (impt_type={impt_type}: prune.py 알파 미사용 경로)")
+    except Exception as e:  # noqa: BLE001
+        alpha_lines.append(f"적용 알파: 확인 실패 ({e})")
+
+    info_path = os.path.join(run_dir, 'run_info.txt')
+    with open(info_path, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("모델 저장 런 정보 (save_models run info)\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"저장 시작 시각 : {run_started.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"작업 디렉토리  : {os.getcwd()}\n")
+        f.write(f"실행 명령어    : {shlex.join([sys.executable] + sys.argv)}\n")
+        f.write(f"impt_type      : {impt_type}\n")
+        for line in alpha_lines:
+            f.write(f"{line}\n")
+        f.write(f"GRL 사용       : {getattr(config, 'glo_use_grl', None)}\n")
+
+    print(f"[모델 저장 폴더 생성] {run_dir} (run_info.txt 기록 완료)")
+    config.glo_model_run_dir = run_dir
+    return run_dir
+
 
 ############################################################################
 # train 함수: 여러 학습률과 에폭 설정으로 모델을 반복 학습하여, 
@@ -221,7 +281,9 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
 
     # 민감그룹 id 목록 (gender=2, UTKFace race=4). main_test.experiment()에서 설정됨.
     sensitive_groups = list(range(config.glo_n_groups))
-    
+    if len(sensitive_groups) != 2:
+        print(f"⚠ EO는 이진 그룹(0/1) 기준으로 계산됩니다. 현재 민감그룹 수={len(sensitive_groups)} — 그룹 2 이상은 EO에 반영되지 않습니다.")
+
     for epoch in range(num_epochs):
         print('에폭 {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
@@ -395,7 +457,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                 ba_mean = np.mean(valid_ba) if valid_ba else None
                 all_ba_means.append(ba_mean if ba_mean is not None else 0)
 
-                # EO 계산: 유효(표본 있는) 그룹만으로 max-min (worst-group)
+                # EO 계산: 이진 그룹(0/1) 전제 — 두 그룹 TPR·FPR 차이의 절댓값
                 tpr_vals, fpr_vals = [], []
                 for g in sensitive_groups:
                     TP = eqodds_stats[task_idx][g]['TP']
@@ -407,15 +469,14 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     tpr_vals.append(tpr)
                     fpr_vals.append(fpr)
 
-                valid_tpr = [v for v in tpr_vals if v is not None]
-                valid_fpr = [v for v in fpr_vals if v is not None]
-                if len(valid_tpr) >= 2 and len(valid_fpr) >= 2:
-                    tpr_gap = max(valid_tpr) - min(valid_tpr)
-                    fpr_gap = max(valid_fpr) - min(valid_fpr)
+                if (len(tpr_vals) >= 2
+                        and None not in (tpr_vals[0], tpr_vals[1], fpr_vals[0], fpr_vals[1])):
+                    tpr_gap = abs(tpr_vals[0] - tpr_vals[1])
+                    fpr_gap = abs(fpr_vals[0] - fpr_vals[1])
                     eo = (tpr_gap + fpr_gap) / 2
                     all_eos.append(eo)
                 else:
-                    # 유효 그룹 부족 시 EO 미계산(None) → 평균에서 제외
+                    # 그룹 0/1 중 표본 없는(P=0 또는 N=0) 쪽이 있으면 EO 미계산(None) → 평균에서 제외
                     all_eos.append(None)
 
             # ... (기존 출력 로직 유지) ...
@@ -492,17 +553,17 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     else:
                         print(f"{class_no} FPR (group={g}): {FP}/{N} = {fpr:.4f}")
 
-                valid_tpr = [v for v in tpr_vals if v is not None]
-                valid_fpr = [v for v in fpr_vals if v is not None]
-                if len(valid_tpr) >= 2 and len(valid_fpr) >= 2:
-                    tpr_gap = max(valid_tpr) - min(valid_tpr)
-                    fpr_gap = max(valid_fpr) - min(valid_fpr)
+                # 이진 그룹(0/1) 전제 — 두 그룹 TPR·FPR 차이의 절댓값 (위 EO 계산과 동일 기준)
+                if (len(tpr_vals) >= 2
+                        and None not in (tpr_vals[0], tpr_vals[1], fpr_vals[0], fpr_vals[1])):
+                    tpr_gap = abs(tpr_vals[0] - tpr_vals[1])
+                    fpr_gap = abs(fpr_vals[0] - fpr_vals[1])
                     eo = (tpr_gap + fpr_gap) / 2
                     print(f"{class_no} TPR gap: {tpr_gap:.4f}")
                     print(f"{class_no} FPR gap: {fpr_gap:.4f}")
                     print(f"{class_no} ⭐⭐⭐ EO: {eo:.4f}")
                 else:
-                    print(f"{class_no} EO: N/A (유효하지 않은 데이터)")
+                    print(f"{class_no} EO: N/A (그룹 0/1 표본 부족)")
                 print("-"*50)
 
             # 출력 저장
@@ -557,21 +618,21 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     f.write(output_text)
                 print(f"[출력 저장] {file_path}")
 
-                #! 모델 저장 (save_models/ 저장 비활성화)
-                # model_save_dir = 'save_models'  # 별도의 모델 저장 폴더
-                # if not os.path.exists(model_save_dir):
-                #     os.makedirs(model_save_dir, exist_ok=True)
-                #
-                # model_filename = f"save_model_prune: {config.glo_prune_iter + 1}_retrain: {epoch + 1}_{timestamp}.pt"
-                # model_path = os.path.join(model_save_dir, model_filename)
-                #
-                # torch.save({
-                #     'model_state_dict': training_model.state_dict(), # 🔥 수정됨 (Wrapper 포함 저장)
-                #     'optimizer_state_dict': optimizer.state_dict(),
-                #     'epoch': epoch,
-                # }, os.path.join(model_save_dir, model_filename))
-                #
-                # print(f"[모델 저장] {model_path}")
+                #! 모델 저장 (save_models/<런 시작 시각>/ 하위에 저장)
+                model_save_dir = _get_model_run_dir()
+
+                model_filename = f"epoch_prune{config.glo_prune_iter + 1:02d}_retrain{epoch + 1:02d}_{timestamp}.pt"
+                model_path = os.path.join(model_save_dir, model_filename)
+
+                torch.save({
+                    'model_state_dict': training_model.state_dict(),  # GRL 사용 시 Wrapper 포함 (base_model.* 키)
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'epoch': epoch,
+                    'prune_iteration': config.glo_prune_iter + 1,
+                    'grl_enabled': use_debiasing,
+                }, model_path)
+
+                print(f"[모델 저장] {model_path}")
 
         if hook_handle is not None:
             hook_handle.remove()
@@ -682,23 +743,25 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     
     print(f"\n🏆 [베스트 모델 요약 저장] {best_model_path}")
     
-    # 🔥 베스트 모델 가중치도 별도 저장 (save_models/ 저장 비활성화)
-    # best_model_weights_dir = 'save_models'
-    # if not os.path.exists(best_model_weights_dir):
-    #     os.makedirs(best_model_weights_dir, exist_ok=True)
-    #
-    # best_weights_filename = f"BEST_MODEL_prune_{config.glo_prune_iter + 1}_acc_{best_acc:.4f}_eo_{best_eo:.4f}_{timestamp}.pt"
-    # best_weights_path = os.path.join(best_model_weights_dir, best_weights_filename)
-    #
-    # torch.save({
-    #     'model_state_dict': best_model_wts,
-    #     'optimizer_state_dict': best_optimizer_state,
-    #     'grl_enabled': use_grl,
-    #     'alpha': alpha,
-    #     'seed': seed,
-    # }, best_weights_path)
-    #
-    # print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")
+    # 🔥 베스트 모델 가중치도 별도 저장 (save_models/<런 시작 시각>/ 하위)
+    best_model_weights_dir = _get_model_run_dir()
+
+    best_weights_filename = f"BEST_MODEL_prune_{config.glo_prune_iter + 1:02d}_acc_{best_acc:.4f}_eo_{best_eo:.4f}_{timestamp}.pt"
+    best_weights_path = os.path.join(best_model_weights_dir, best_weights_filename)
+
+    torch.save({
+        'model_state_dict': best_model_wts,  # GRL 사용 시 Wrapper 포함 (base_model.* 키)
+        'optimizer_state_dict': best_optimizer_state,
+        'grl_enabled': use_grl,
+        'alpha': alpha,
+        'seed': seed,
+        'prune_iteration': config.glo_prune_iter + 1,
+        'best_acc': float(best_acc),
+        'best_eo': float(best_eo),
+        'best_loss': float(best_loss),
+    }, best_weights_path)
+
+    print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")
 
     # 🔥 Debiasing 모드면 원래 모델 반환
     torch.backends.cudnn.enabled = prev_cudnn_enabled

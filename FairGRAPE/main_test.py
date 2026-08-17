@@ -49,6 +49,7 @@ def experiment(args):
 
     import config
     config.glo_use_grl = use_grl
+    config.glo_impt_type = args.impt  # save_models run_info.txt에 impt_type별 적용 알파를 기록하기 위함
 
     # 결과 저장용 디렉토리 생성
     save_dir = "trained_model/{}".format(prune_type)
@@ -229,6 +230,7 @@ def experiment(args):
         retrain_lr = args.retrain_lr # 재학습 학습률
         retrain_iters = args.retrain_iter # 재학습 반복 횟수
         keep_per_iter = args.keep_per_iter # 매 횟수마다 남기는 가중치 비율 (90%라면 10%만 삭제)
+        config.glo_keep_per_iter = keep_per_iter  # impt_type=2 채널 프루닝이 이 값을 iter당 제거율로 사용
         lr_decay_iter = args.lr_decay_iter # 가지치기 과정중 학습률을 감소시키는 시점점
         prune_iters = math.ceil(math.log((1 - prune_rate) / pct_remain_after_this_iter, keep_per_iter)) if prune_iters is None else prune_iters
         lr_decay_iter = int(prune_iters * 0.7) if lr_decay_iter is None else lr_decay_iter
@@ -391,6 +393,8 @@ def experiment(args):
             
             # 민감그룹 id 목록 (gender=2, UTKFace race=4)
             sensitive_groups = list(range(config.glo_n_groups))
+            if len(sensitive_groups) != 2:
+                print(f"⚠ EO는 이진 그룹(0/1) 기준으로 계산됩니다. 현재 민감그룹 수={len(sensitive_groups)} — 그룹 2 이상은 EO에 반영되지 않습니다.")
             # Balanced Accuracy용
             balanced_acc_stats = [{(g, c): [0, 0] for g in sensitive_groups for c in [0,1]}
                                 for _ in range(len(col_used_training))]
@@ -463,7 +467,7 @@ def experiment(args):
                 ba_mean = np.mean(valid_ba) if valid_ba else None
                 all_ba_means.append(ba_mean)
 
-                # EO 계산: 유효(표본 있는) 그룹만으로 max-min (worst-group)
+                # EO 계산: 이진 그룹(0/1) 전제 — 두 그룹 TPR·FPR 차이의 절댓값
                 tpr_vals, fpr_vals = [], []
                 for g in sensitive_groups:
                     TP = eqodds_stats[task_idx][g]['TP']
@@ -475,11 +479,10 @@ def experiment(args):
                     tpr_vals.append(tpr)
                     fpr_vals.append(fpr)
 
-                valid_tpr = [v for v in tpr_vals if v is not None]
-                valid_fpr = [v for v in fpr_vals if v is not None]
-                if len(valid_tpr) >= 2 and len(valid_fpr) >= 2:
-                    tpr_gap = max(valid_tpr) - min(valid_tpr)
-                    fpr_gap = max(valid_fpr) - min(valid_fpr)
+                if (len(tpr_vals) >= 2
+                        and None not in (tpr_vals[0], tpr_vals[1], fpr_vals[0], fpr_vals[1])):
+                    tpr_gap = abs(tpr_vals[0] - tpr_vals[1])
+                    fpr_gap = abs(fpr_vals[0] - fpr_vals[1])
                     eo = (tpr_gap + fpr_gap) / 2
                     all_eos.append(eo)
                 else:

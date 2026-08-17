@@ -2,79 +2,80 @@
 Channel Pruning Log
   iteration  : 81
   alpha      : 0.5000
-  timestamp  : 2026-07-14 03:21:35
-  remove_target  : 5705
-  accum_removed  : 5904
-  selected_channels : 16
+  timestamp  : 2026-07-14 13:11:57
+  remove_target  : 5729
+  accum_removed  : 5959
+  selected_channels : 15
   gamma             : 0.0050
   remove_target_met : yes
   total_params   : 2192320
-  active_after   : 635325
+  active_after   : 636208
   model_sparsity : 71.0%
 ================================================================================
 
 [ 레이어별 채널 제거 비율 ]
   layer                total_ch  this_iter    cumul  cumul_%
   ----------------------------------------------------------
-  features.1                 32          0       23    71.9%
-  features.2                 96          0       84    87.5%
-  features.3                144          0      121    84.0%
+  features.1                 32          0       24    75.0%
+  features.2                 96          0       82    85.4%
+  features.3                144          0      119    82.6%
   features.4                144          0      139    96.5%
-  features.5                192          0       70    36.5%
-  features.6                192          0      185    96.4%
-  features.7                192          0      184    95.8%
-  features.8                384          0      327    85.2%
-  features.9                384          0      358    93.2%
+  features.5                192          0      160    83.3%
+  features.6                192          0      165    85.9%
+  features.7                192          0      186    96.9%
+  features.8                384          0      158    41.1%
+  features.9                384          0      372    96.9%
   features.10               384          0      372    96.9%
   features.11               384          0      372    96.9%
   features.12               576          0      558    96.9%
-  features.13               576          0      558    96.9%
-  features.14               576          0      545    94.6%
-  features.15               960          0      845    88.0%
-  features.16               960         12      761    79.3%
-  features.17               960          4      805    83.9%
+  features.13               576          2      527    91.5%
+  features.14               576          0      558    96.9%
+  features.15               960          1      873    90.9%
+  features.16               960          4      758    79.0%
+  features.17               960          8      825    85.9%
 
 [ 레이어별 보호 영역 (γ=0.01) ]
   layer                  active  protected  protect_%
   --------------------------------------------------
-  features.1                  9          1      11.1%
-  features.2                 12          1       8.3%
-  features.3                 23          1       4.3%
+  features.1                  8          1      12.5%
+  features.2                 14          1       7.1%
+  features.3                 25          1       4.0%
   features.4                  5          1      20.0%
-  features.5                122          1       0.8%
-  features.6                  7          1      14.3%
-  features.7                  8          1      12.5%
-  features.8                 57          1       1.8%
-  features.9                 26          1       3.8%
+  features.5                 32          1       3.1%
+  features.6                 27          1       3.7%
+  features.7                  6          1      16.7%
+  features.8                226          2       0.9%
+  features.9                 12          1       8.3%
   features.10                12          1       8.3%
   features.11                12          1       8.3%
   features.12                18          1       5.6%
-  features.13                18          1       5.6%
-  features.14                31          1       3.2%
-  features.15               115          1       0.9%
-  features.16               211          2       0.9%
-  features.17               159          1       0.6%
+  features.13                51          1       2.0%
+  features.14                18          1       5.6%
+  features.15                88          1       1.1%
+  features.16               206          2       1.0%
+  features.17               143          1       0.7%
 
 [ 블록별 제거 채널 수 ]
-  features.16: 12채널 제거
-  features.17: 4채널 제거
+  features.13: 2채널 제거
+  features.15: 1채널 제거
+  features.16: 4채널 제거
+  features.17: 8채널 제거
 
 [ 선택된 채널 상세 ]
 block                             ch        score          phi         perf  weights
 --------------------------------------------------------------------------------
-features.16                      128    -0.203101 2.597071e-06 1.273915e-06      329
-features.16                       79    -0.185704 2.377424e-06 2.947308e-06      329
-features.16                      113    -0.185144 2.375194e-06 6.082185e-06      329
-features.17                      390    -0.183297 3.907140e-06 4.686753e-06      489
-features.16                       15    -0.179176 2.291030e-06 1.051147e-06      329
-features.16                      659    -0.175293 2.247643e-06 5.013797e-06      329
-features.16                       24    -0.173104 2.454859e-06 1.545609e-04      329
-features.17                      813    -0.171259 4.738791e-06 2.494254e-05      489
-features.17                      215    -0.171133 3.591670e-06 3.314279e-06      489
-features.16                      608    -0.171037 2.227441e-06 2.674719e-05      329
-features.16                      559    -0.169566 2.391929e-06 1.432897e-04      329
-features.16                      666    -0.168835 2.262692e-06 6.705127e-05      329
-features.16                        2    -0.165660 2.293797e-06 1.126301e-04      329
-features.16                      349    -0.162852 2.325555e-06 1.556346e-04      329
-features.17                      327    -0.162094 3.393177e-06 2.973257e-06      489
-features.16                      660    -0.162006 2.085801e-06 1.005664e-05      329
+features.17                      729    -0.211481 6.367395e-06 3.018103e-05      489
+features.17                      101    -0.176643 4.098891e-06 8.596806e-06      489
+features.17                      256    -0.155015 5.100762e-06 2.802726e-05      489
+features.17                      428    -0.143823 3.754622e-06 1.268381e-05      489
+features.16                      446    -0.141656 1.291321e-06 1.704803e-05      329
+features.17                      292    -0.138353 2.832330e-06 1.583731e-06      489
+features.16                        9    -0.130613 1.260896e-06 8.127835e-05      329
+features.17                      445    -0.127008 2.801061e-06 4.191540e-06      489
+features.16                      892    -0.126152 1.143581e-06 9.206617e-06      329
+features.17                      916    -0.124636 2.629085e-06 2.483104e-06      489
+features.17                      447    -0.124078 2.629570e-06 2.638918e-06      489
+features.13                       36    -0.123785 2.580620e-07 4.746594e-05      201
+features.16                      149    -0.120215 1.111351e-06 2.892499e-05      329
+features.13                       70    -0.120143 2.622220e-07 6.741934e-05      201
+features.15                      280    -0.119949 1.076549e-06 5.201751e-06      329
