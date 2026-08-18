@@ -351,6 +351,20 @@ class FaceDataset(Dataset):
         # label을 텐서로 변환
         return (image, torch.from_numpy(np.asarray(labels)))
 
+def seed_worker(worker_id):
+    """DataLoader 워커 프로세스의 RNG(numpy·random·imgaug)를 결정적으로 시드한다.
+
+    torch.initial_seed()는 메인 프로세스의 torch 시드에서 파생된 base_seed + worker_id이므로,
+    메인에서 util.setseed(seed)를 호출했다면 워커별 imgaug 증강도 실행 간에 동일하게 재현된다.
+    (이전에는 워커의 imgaug/numpy RNG가 시드되지 않아 같은 시드라도 매 실행 증강이 달랐음.)
+    """
+    import random
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+    ia.seed(worker_seed)
+
+
 # 학습용 데이터로더와 테스트용 데이터로더를 만드는 함수
 def make_datasets(train_frame, val_frame, give_dataloader=True, batch_size=64, col_used=None):
     transform_train_data = transforms.Compose([
@@ -368,7 +382,8 @@ def make_datasets(train_frame, val_frame, give_dataloader=True, batch_size=64, c
                                            )
 
     #train_dataloader = DataLoader(transformed_train_dataset, batch_size=batch_size, shuffle=True, num_workers=8)
-    train_dataloader = DataLoader(transformed_train_dataset, batch_size=batch_size, shuffle=False, num_workers=8)
+    train_dataloader = DataLoader(transformed_train_dataset, batch_size=batch_size, shuffle=False, num_workers=8,
+                                  worker_init_fn=seed_worker)
 
     transform_test_data = transforms.Compose([
         transforms.ToPILImage(),
@@ -384,7 +399,7 @@ def make_datasets(train_frame, val_frame, give_dataloader=True, batch_size=64, c
                                           )
 
     test_dataloader = DataLoader(transformed_test_dataset, batch_size=batch_size,
-                                 shuffle=False, num_workers=8)
+                                 shuffle=False, num_workers=8, worker_init_fn=seed_worker)
     #test_dataloader = DataLoader(transformed_test_dataset, batch_size=batch_size, shuffle=True, num_workers=8)
     
     if give_dataloader:

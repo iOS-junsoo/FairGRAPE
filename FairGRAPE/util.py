@@ -625,11 +625,19 @@ def download_dataset(dataset, img_dir):
 def setseed(seed):
     """
     랜덤 시드를 고정해 재현성(reproducibility)을 높입니다.
+    torch(CPU+CUDA)·numpy·python random·imgaug 전역 RNG를 모두 고정합니다.
+    DataLoader 워커 프로세스는 dataset.seed_worker()가 워커별로 다시 시드합니다.
     """
+    import random
+    import imgaug as ia
+
+    random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    np.random.seed(seed)
+    ia.seed(seed)
 
 
 # -----------------------------------------------------------------------------
