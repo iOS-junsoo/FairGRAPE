@@ -10,7 +10,7 @@ import copy
 import pandas as pd
 import numpy as np
 
-from dataset import make_frame, make_datasets, prepare_ImageNet
+from dataset import make_frame, make_datasets, prepare_ImageNet, apply_fscl_skew, make_balanced_eval
 from prune import WS, SNIP, GraSP, Lottery, FairGRAPE, Importance, Random, save_impt_df
 from util import make_model, save_model, save_output, download_dataset, show_acc_df, setseed, save_unpruned_model, print_acc_scores, safe_forward_with_cudnn_fallback, filter_readable_images_in_frames
 from train_and_val import train, loss_multi_tasks
@@ -33,6 +33,8 @@ def experiment(args):
     batch_size = args.batch
     init_train = not args.no_init_train
     drop_race = args.drop_race  # util.make_frame() 참고
+    race_binary = args.race_binary  # dataset.relabel() 참고 (White vs Non-White 이진 병합)
+    skew_beta = args.skew_beta  # dataset.apply_fscl_skew() 참고 (Phase 2 편향 주입)
     retrain = not args.no_retrain
     save_mask = args.save_mask
     delta_p = args.delta_p
@@ -50,6 +52,12 @@ def experiment(args):
     import config
     config.glo_use_grl = use_grl
     config.glo_impt_type = args.impt  # save_models run_info.txt에 impt_type별 적용 알파를 기록하기 위함
+    config.glo_dataset = dataset
+    config.glo_seed = seed
+
+    # 실험 시작 전에 결과 저장 폴더(retrain_epoch_results/임시 저장소/<dataset>_impt<impt>_seed<seed>_<시각>)를 미리 생성
+    from train_and_val import _get_results_run_dir
+    _get_results_run_dir()
 
     # 결과 저장용 디렉토리 생성
     save_dir = "trained_model/{}".format(prune_type)
@@ -89,6 +97,14 @@ def experiment(args):
     elif dataset == 'UTKFace':
         csv = 'csv/UTKFace_labels.csv'
         face_dir = 'Images/UTKFace'
+        # race_binary(White vs Non-White) 모드 가드: race 태스크·drop_race와는 의미가 충돌한다.
+        if race_binary and loss_type not in ('gender', 'age'):
+            raise ValueError(f"--race_binary는 loss_type gender/age에서만 사용할 수 있습니다. 현재: {loss_type}")
+        if race_binary and drop_race:
+            raise ValueError("--race_binary와 --drop_race는 동시에 사용할 수 없습니다.")
+        if race_binary:
+            # Others 1,692장을 포함한 전체 CSV (scripts/make_utkface_full_csv.py 로 생성)
+            csv = 'csv/UTKFace_labels_full.csv'
         download_dataset(dataset, face_dir)
         # 학습에 사용될 변수 설정
         if loss_type == 'race':
@@ -104,7 +120,10 @@ def experiment(args):
         epoches = [13, 3, 3]
         # UTKFace는 drop_race를 메인 파이프라인 전체(사전학습·φ·재학습·평가)에 적용한다.
         # 예: --drop_race 3 4 → Asian·Indian 제거 후 White/Black 2그룹으로 전 과정 진행.
-        frames = make_frame(csv, face_dir, seven_races=False, drop_race=drop_race)
+        # race_binary 시에는 (gender × race 5범주) 층화 8:1:1 분할 + 분할 결과 CSV 저장.
+        frames = make_frame(csv, face_dir, seven_races=False, drop_race=drop_race,
+                            race_binary=race_binary, stratify=race_binary,
+                            split_csv_out='csv/utkface_split_seed42.csv' if race_binary else None)
         if drop_race:
             frames_minority = make_frame(csv, face_dir, seven_races=False, drop_race=drop_race)
             train_loader_minority, _ = make_datasets(frames_minority['train'], frames_minority['val'], True, batch_size, col_used)
@@ -153,6 +172,15 @@ def experiment(args):
             )
     elif dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA']:
         print('이미지 가독성 검사를 건너뜁니다 (--skip_readable_check).')
+
+    # Phase 2 (FSCL식 편향 주입): 가독성 필터링 이후에 적용해 최종 데이터 기준으로 셀 비율을 맞춘다.
+    # train은 White m:f=β:1 / Non-White 1:β 재표집, val/test는 (race×gender) 4셀 완전 균형.
+    if skew_beta:
+        if dataset != 'UTKFace' or not race_binary:
+            raise ValueError("--skew_beta는 UTKFace + --race_binary 조합에서만 사용할 수 있습니다.")
+        frames['train'] = apply_fscl_skew(frames['train'], skew_beta)
+        frames['val'] = make_balanced_eval(frames['val'])
+        frames['test'] = make_balanced_eval(frames['test'])
 
     # 민감그룹 수를 전역(config)으로 전달 (gender=2, UTKFace race=4, drop_race 3 4 → 2)
     # len(set) 대신 max+1: drop_race로 중간 번호가 비어도(예: {0,1,3}) 그룹 id 범위가 어긋나지 않게.
@@ -714,6 +742,8 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=42, help='랜덤 시드 설정 (재현성 확보를 위함)')
     parser.add_argument('--save_model_iter', nargs='+', type=int, default=-1, help='특정 가지치기 iteration(또는 epoch)에 모델을 저장할지 여부')
     parser.add_argument('--skip_readable_check', action='store_true', help='dlib 기반 이미지 가독성 검사를 건너뜀')
+    parser.add_argument('--race_binary', action='store_true', help='UTKFace 전용: race를 White(0) vs Non-White(1) 이진으로 병합 (Others 포함, csv/UTKFace_labels_full.csv + gender×race5 층화 분할 사용)')
+    parser.add_argument('--skew_beta', type=float, default=0, help='UTKFace race_binary 전용: FSCL식 편향 주입 비율 β (>1). train을 White m:f=β:1 / Non-White 1:β로 재표집하고 val/test는 (race×gender) 4셀 균형으로 재구성. 0이면 비활성')
 
 
 

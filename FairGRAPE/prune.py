@@ -29,7 +29,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.5
+IMPT_TYPE2_ALPHA = 0.9
 IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정성 혼합 가중치. 직접 수정하면 됨.
 # impt_type=3 정규화 방식. 'rank': 블록 내 활성 가중치의 순위 백분위(0~1) — perf/φ 분포 모양과
 # 무관하게 같은 스케일이 되어 alpha가 실제 혼합 비율로 작동. 'max': 기존 블록 max 나눗셈
@@ -38,7 +38,12 @@ IMPT3_NORM = 'rank'
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 # IMPT2_KEEP_PER_ITER = 0.975  # → 명령어 인자 --keep_per_iter (config.glo_keep_per_iter)로 대체됨. 이 값을 바꿔도 반영 안 됨.
 IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03  # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 3%는 유지
-IMPT2_PROTECTION_RATIO = 0.005  # impt_type=2/3: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
+IMPT2_PROTECTION_RATIO  =0.005  # impt_type=2/3: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
+# impt_type=2 정규화 방식. 'rank': 활성 채널의 순위 백분위(0~1) — perf가 제곱 heavy-tail이라
+# max 나눗셈은 벌크가 0으로 붕괴해 alpha가 실효 혼합비로 작동하지 못함(2026-08-21 진단:
+# max에서 α=0.7이어도 perf:φ 실효 기여 0.22:1, rank에서는 2.33:1로 설계대로 동작).
+# 'max': 기존 블록 max 나눗셈 — 과거 CelebA 실험 재현 시에만 사용.
+IMPT2_NORM = 'rank'
 
 
 forward_mapping_dict = {
@@ -153,23 +158,25 @@ class Random(Prunner):
 
     def get_mask(self, prune_cfgs):
         compression_rate, by_layer = prune_cfgs
+        # prune()의 마스크 적용 순서와 동일하게, 프루닝 대상(forward_mapping_dict 타입) 레이어만 순회.
+        # (기존 코드는 루트 모델·컨테이너까지 .weight를 참조해 AttributeError로 즉사했음)
+        layers = [layer for layer in self.prun_model.modules()
+                  if type(layer).__name__ in forward_mapping_dict]
         masks = []
         if by_layer:
-            for layer in self.prun_model.modules():
-                mask = np.random.rand(layer.weight.shape)
-                keep_params = int((1 - compression_rate) * math.prod(mask.shape))
-                values, _ = torch.topk(mask, keep_params, sorted=True)
-                threshold = values[-1]
-                masks.append((mask > threshold).int())
+            # 레이어별 균등 희소도: 각 레이어에서 무작위로 (1-compression_rate)만 남김
+            for layer in layers:
+                scores = torch.rand_like(layer.weight)
+                keep_params = max(1, int(round((1 - compression_rate) * scores.numel())))
+                threshold = torch.topk(scores.flatten(), keep_params, sorted=True).values[-1]
+                masks.append((scores >= threshold).int())
         else:
-            total_params = 0
-            for layer in self.prun_model.modules():
-                masks.append(np.random.rand(layer.weight.shape))
-                total_params += math.prod(layer.weight.shape)
-            keep_params = int((1 - compression_rate) * total_params)
-            values, _ = torch.topk(masks, keep_params, sorted=True)
-            threshold = values[-1]
-            masks = [(mask > threshold).int() for mask in masks]
+            # 전역 균등 희소도: 전 레이어 합쳐서 무작위로 (1-compression_rate)만 남김
+            scores = [torch.rand_like(layer.weight) for layer in layers]
+            flat = torch.cat([s.flatten() for s in scores])
+            keep_params = max(1, int(round((1 - compression_rate) * flat.numel())))
+            threshold = torch.topk(flat, keep_params, sorted=True).values[-1]
+            masks = [(s >= threshold).int() for s in scores]
         return masks
 
 class SNIP(Prunner): 
@@ -1275,6 +1282,26 @@ def _compute_protected_channels(model, perf_by_layer, protection_ratio):
     return protected_set, protected_per_layer, active_per_layer
 
 
+def _get_pruning_log_run_dir(base_dir, cache_attr):
+    """base_dir 아래 <dataset>_impt<impt>_seed<seed>_<첫 저장 시각> 런 폴더를 반환.
+    retrain_epoch_results 런 폴더(_get_results_run_dir)와 동일한 명명 규칙.
+    프로세스당 한 번만 생성하고 config에 캐시해 한 런의 iter 로그가 전부 같은 폴더에 모이게 한다."""
+    import config as _config
+    import datetime as _dt
+    run_dir = getattr(_config, cache_attr, None)
+    if run_dir:
+        return run_dir
+    ds = getattr(_config, 'glo_dataset', None) or 'unknown'
+    impt = getattr(_config, 'glo_impt_type', None)
+    seed = getattr(_config, 'glo_seed', None)
+    stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_dir = os.path.join(base_dir, f"{ds}_impt{impt}_seed{seed}_{stamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    setattr(_config, cache_attr, run_dir)
+    print(f"[pruning 로그 런 폴더 생성] {run_dir}")
+    return run_dir
+
+
 def _save_channel_pruning_log(
     selected_channels,
     score_by_channel_dict,
@@ -1292,11 +1319,17 @@ def _save_channel_pruning_log(
     gamma=None,
     protected_per_layer=None,
     active_per_layer=None,
+    phi_scaled_by_layer=None,
+    perf_scaled_by_layer=None,
 ):
     import datetime
-    os.makedirs(log_dir, exist_ok=True)
+    import config as _config
+    # 런별 하위 폴더(<dataset>_impt<impt>_seed<seed>_<첫 저장 시각>)에 iter 로그를 모은다.
+    log_dir = _get_pruning_log_run_dir(log_dir, 'glo_channel_log_run_dir')
 
-    filename = f"alpha{alpha:.1f}_iter{prune_iter + 1:02d}.txt"
+    # rank 정규화 런은 파일명에 태그를 붙여 기존 max 런 로그를 덮어쓰지 않게 한다.
+    norm_tag = '' if IMPT2_NORM == 'max' else f"_{IMPT2_NORM}"
+    filename = f"alpha{alpha:.1f}{norm_tag}_iter{prune_iter + 1:02d}.txt"
     filepath = os.path.join(log_dir, filename)
 
     # 블록별 선택된 채널 수 집계
@@ -1325,8 +1358,12 @@ def _save_channel_pruning_log(
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
         f.write(f"Channel Pruning Log\n")
+        f.write(f"  dataset    : {getattr(_config, 'glo_dataset', None)}\n")
+        f.write(f"  impt_type  : {getattr(_config, 'glo_impt_type', None)}\n")
+        f.write(f"  seed       : {getattr(_config, 'glo_seed', None)}\n")
         f.write(f"  iteration  : {prune_iter + 1}\n")
         f.write(f"  alpha      : {alpha:.4f}\n")
+        f.write(f"  norm       : {IMPT2_NORM}\n")
         f.write(f"  timestamp  : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"  remove_target  : {remove_target}\n")
         f.write(f"  accum_removed  : {accum_removed}\n")
@@ -1358,7 +1395,7 @@ def _save_channel_pruning_log(
 
         # 레이어별 보호 영역 (γ 적용 시)
         if gamma is not None and active_per_layer is not None:
-            f.write(f"[ 레이어별 보호 영역 (γ={gamma:.2f}) ]\n")
+            f.write(f"[ 레이어별 보호 영역 (γ={gamma:.4f}) ]\n")
             f.write(f"  {'layer':<20} {'active':>8} {'protected':>10} {'protect_%':>10}\n")
             f.write("  " + "-" * 50 + "\n")
             for block_num in range(1, 18):
@@ -1375,10 +1412,14 @@ def _save_channel_pruning_log(
             f.write(f"  {block_name}: {block_count[block_name]}채널 제거\n")
         f.write("\n")
 
-        # 채널별 상세
+        # 채널별 상세 (phi/perf: 정규화 전 raw, phi_n/perf_n: 정규화 후 — rank면 활성 채널 백분위)
         f.write("[ 선택된 채널 상세 ]\n")
-        f.write(f"{'block':<30} {'ch':>5} {'score':>12} {'phi':>12} {'perf':>12} {'weights':>8}\n")
-        f.write("-" * 80 + "\n")
+        f.write("  (phi/perf: raw, phi_n/perf_n: 정규화 후 값 — score = α·perf_n − (1−α)·phi_n)\n")
+        f.write(
+            f"{'block':<30} {'ch':>5} {'score':>12} {'phi':>12} {'perf':>12} "
+            f"{'phi_n':>8} {'perf_n':>8} {'weights':>8}\n"
+        )
+        f.write("-" * 100 + "\n")
 
         for block_name, channel_k in selected_channels:
             key = (block_name, channel_k)
@@ -1397,9 +1438,19 @@ def _save_channel_pruning_log(
             if conv1_name in perf_by_layer and channel_k < len(perf_by_layer[conv1_name]):
                 perf_val = perf_by_layer[conv1_name][channel_k].item()
 
+            phi_n_val = float('nan')
+            perf_n_val = float('nan')
+            if (phi_scaled_by_layer is not None and conv1_name in phi_scaled_by_layer
+                    and channel_k < len(phi_scaled_by_layer[conv1_name])):
+                phi_n_val = phi_scaled_by_layer[conv1_name][channel_k].item()
+            if (perf_scaled_by_layer is not None and conv1_name in perf_scaled_by_layer
+                    and channel_k < len(perf_scaled_by_layer[conv1_name])):
+                perf_n_val = perf_scaled_by_layer[conv1_name][channel_k].item()
+
             f.write(
                 f"{block_name:<30} {channel_k:>5} {score:>12.6f} "
-                f"{phi_val:>12.6e} {perf_val:>12.6e} {weight_count:>8}\n"
+                f"{phi_val:>12.6e} {perf_val:>12.6e} "
+                f"{phi_n_val:>8.4f} {perf_n_val:>8.4f} {weight_count:>8}\n"
             )
 
     print(f"[채널 pruning 로그 저장] {filepath}")
@@ -1499,7 +1550,9 @@ def _save_weight_pruning_log(
                        (선택) 'removed_phi_med', 'removed_perf_med'} ...]
     worst_selected: [(score, layer_name, flat_idx) ...] 점수 낮은 순 샘플."""
     import datetime
-    os.makedirs(log_dir, exist_ok=True)
+    import config as _config
+    # 런별 하위 폴더(<dataset>_impt<impt>_seed<seed>_<첫 저장 시각>)에 iter 로그를 모은다.
+    log_dir = _get_pruning_log_run_dir(log_dir, 'glo_weight_log_run_dir')
 
     norm_tag = f"_{norm}" if norm else ""
     filename = f"alpha{alpha:.1f}{norm_tag}_iter{prune_iter + 1:02d}.txt"
@@ -1508,6 +1561,9 @@ def _save_weight_pruning_log(
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
         f.write("Weight Pruning Log (impt_type=3)\n")
+        f.write(f"  dataset    : {getattr(_config, 'glo_dataset', None)}\n")
+        f.write(f"  impt_type  : {getattr(_config, 'glo_impt_type', None)}\n")
+        f.write(f"  seed       : {getattr(_config, 'glo_seed', None)}\n")
         f.write(f"  iteration  : {prune_iter + 1}\n")
         f.write(f"  alpha      : {alpha:.4f}\n")
         f.write(f"  timestamp  : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -2060,7 +2116,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         if not 0.0 < keep_per_iter <= 1.0:
             raise ValueError(f"keep_per_iter는 0 초과 1 이하여야 합니다. 현재: {keep_per_iter}")
 
-        print(f"impt_type == 2: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}로 채널 단위 fairness-aware pruning 시작")
+        print(f"impt_type == 2: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={IMPT2_NORM}로 채널 단위 fairness-aware pruning 시작")
 
         phi_by_layer, phi_weight_by_layer, _, _ = compute_phi_k(
             model,
@@ -2143,6 +2199,8 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             )
 
         score_by_channel = []
+        phi_scaled_by_layer_ch = {}   # conv1_name -> 정규화된 φ (로그용, rank면 활성 채널 백분위)
+        perf_scaled_by_layer_ch = {}  # conv1_name -> 정규화된 perf (로그용)
         for conv1_name, phi_vec in phi_by_layer.items():
             perf_vec = perf_by_layer.get(conv1_name)
             if perf_vec is None:
@@ -2158,14 +2216,30 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                 continue
             block_name = conv1_name.rsplit('.conv.', 1)[0]
 
-            phi_scaled = scale_score_tensor(phi_vec)
-            perf_scaled = scale_score_tensor(perf_vec)
+            weight_counts = [_count_channel_weights(model, block_name, k) for k in range(len(phi_vec))]
+            if IMPT2_NORM == 'rank':
+                # 활성(미프루닝) 채널만의 순위 백분위(0~1). 프루닝된 채널을 포함해 순위를 매기면
+                # 반복이 진행될수록 활성 채널이 상위 구간으로 밀려 레이어 간 비교가 왜곡된다.
+                active_idx = torch.tensor([k for k, w in enumerate(weight_counts) if w > 0],
+                                          dtype=torch.long, device=phi_vec.device)
+                phi_scaled = torch.zeros_like(phi_vec)
+                perf_scaled = torch.zeros_like(perf_vec)
+                if len(active_idx) > 0:
+                    phi_scaled[active_idx] = _rank_percentile(phi_vec[active_idx]).to(phi_scaled.dtype)
+                    perf_scaled[active_idx] = _rank_percentile(perf_vec[active_idx]).to(perf_scaled.dtype)
+            elif IMPT2_NORM == 'max':
+                phi_scaled = scale_score_tensor(phi_vec)
+                perf_scaled = scale_score_tensor(perf_vec)
+            else:
+                raise ValueError(f"IMPT2_NORM은 'rank' 또는 'max'여야 합니다. 현재: {IMPT2_NORM}")
             combined_scores = (alpha * perf_scaled) - ((1.0 - alpha) * phi_scaled)
+            phi_scaled_by_layer_ch[conv1_name] = phi_scaled.detach().cpu()
+            perf_scaled_by_layer_ch[conv1_name] = perf_scaled.detach().cpu()
 
             for channel_k in range(len(combined_scores)):
                 if (block_name, channel_k) in protected_set:
                     continue
-                weight_count = _count_channel_weights(model, block_name, channel_k)
+                weight_count = weight_counts[channel_k]
                 if weight_count <= 0:
                     continue
                 score_by_channel.append((combined_scores[channel_k].item(), block_name, channel_k, weight_count))
@@ -2305,6 +2379,8 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             gamma=gamma,
             protected_per_layer=protected_per_layer,
             active_per_layer=active_per_layer,
+            phi_scaled_by_layer=phi_scaled_by_layer_ch,
+            perf_scaled_by_layer=perf_scaled_by_layer_ch,
         )
 
         # 최종 마스크 리스트 반환 (layer 순서 유지)

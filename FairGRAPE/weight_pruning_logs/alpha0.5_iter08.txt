@@ -1,0 +1,91 @@
+================================================================================
+Weight Pruning Log (impt_type=3)
+  iteration  : 8
+  alpha      : 0.5000
+  timestamp  : 2026-08-09 22:53:31
+  remove_target  : 85103
+  accum_removed  : 85103
+  gamma          : 0.0050
+  remove_target_met : yes
+  total_params   : 2289600
+  active_after   : 1276232
+  model_sparsity : 44.3%
+================================================================================
+
+[ 레이어별 가중치 제거 현황 ]
+  layer                              numel    active  protect  removed     cumul  cumul_%
+  --------------------------------------------------------------------------------------
+  features.1.conv.0.0                  288       155        1        1       134    46.5%
+  features.1.conv.1                    512       300        2        0       212    41.4%
+  features.2.conv.0.0                 1536       581        3        0       955    62.2%
+  features.2.conv.1.0                  864       261        2        0       603    69.8%
+  features.2.conv.2                   2304       714        4        0      1590    69.0%
+  features.3.conv.0.0                 3456      1089        6        0      2367    68.5%
+  features.3.conv.1.0                 1296       144        1        0      1152    88.9%
+  features.3.conv.2                   3456       858        5        0      2598    75.2%
+  features.4.conv.0.0                 3456       694        4        0      2762    79.9%
+  features.4.conv.1.0                 1296        79        1        0      1217    93.9%
+  features.4.conv.2                   4608       574        3        0      4034    87.5%
+  features.5.conv.0.0                 6144      2650       14        0      3494    56.9%
+  features.5.conv.1.0                 1728       306        2        0      1422    82.3%
+  features.5.conv.2                   6144      2269       12        0      3875    63.1%
+  features.6.conv.0.0                 6144      3635       19        0      2509    40.8%
+  features.6.conv.1.0                 1728       389        2        0      1339    77.5%
+  features.6.conv.2                   6144      2997       15        0      3147    51.2%
+  features.7.conv.0.0                 6144      1822       10        0      4322    70.3%
+  features.7.conv.1.0                 1728        56        1        0      1672    96.8%
+  features.7.conv.2                  12288      1478        8        0     10810    88.0%
+  features.8.conv.0.0                24576     12780       64        0     11796    48.0%
+  features.8.conv.1.0                 3456       324        2        0      3132    90.6%
+  features.8.conv.2                  24576     11793       59        0     12783    52.0%
+  features.9.conv.0.0                24576      8945       45        0     15631    63.6%
+  features.9.conv.1.0                 3456       152        1        0      3304    95.6%
+  features.9.conv.2                  24576      6171       31        0     18405    74.9%
+  features.10.conv.0.0               24576     11992       60        0     12584    51.2%
+  features.10.conv.1.0                3456       373        2        0      3083    89.2%
+  features.10.conv.2                 24576     10463       53        0     14113    57.4%
+  features.11.conv.0.0               24576     17212       87        0      7364    30.0%
+  features.11.conv.1.0                3456       235        2        0      3221    93.2%
+  features.11.conv.2                 36864     17764       89        0     19100    51.8%
+  features.12.conv.0.0               55296     35995      180     6451     25752    46.6%
+  features.12.conv.1.0                5184       888        5      271      4567    88.1%
+  features.12.conv.2                 55296     26131      131    12078     41243    74.6%
+  features.13.conv.0.0               55296     19515       98      543     36324    65.7%
+  features.13.conv.1.0                5184      1143        6       46      4087    78.8%
+  features.13.conv.2                 55296     18226       92      195     37265    67.4%
+  features.14.conv.0.0               55296      4099       21      185     51382    92.9%
+  features.14.conv.1.0                5184       173        1        6      5017    96.8%
+  features.14.conv.2                 92160     21273      107      129     71016    77.1%
+  features.15.conv.0.0              153600     40523      203     1346    114423    74.5%
+  features.15.conv.1.0                8640      1324        7       48      7364    85.2%
+  features.15.conv.2                153600     57448      288     1722     97874    63.7%
+  features.16.conv.0.0              153600     54372      272     2236    101464    66.1%
+  features.16.conv.1.0                8640      1953       10       85      6772    78.4%
+  features.16.conv.2                153600     78783      394      804     75621    49.2%
+  features.17.conv.0.0              153600    125256      627    46108     74452    48.5%
+  features.17.conv.1.0                8640      1895       10      691      7436    86.1%
+  features.17.conv.2                307200    242779     1214    12158     76579    24.9%
+
+[ 제거 점수 하위 샘플 (score 오름차순) ]
+layer                            flat_idx          score
+------------------------------------------------------------
+features.17.conv.0.0                42230   0.000000e+00
+features.17.conv.0.0                42240   0.000000e+00
+features.17.conv.0.0                42239   0.000000e+00
+features.17.conv.0.0                42238   0.000000e+00
+features.17.conv.0.0                42237   0.000000e+00
+features.17.conv.0.0                42236   0.000000e+00
+features.17.conv.0.0                42235   0.000000e+00
+features.17.conv.0.0                42246   0.000000e+00
+features.17.conv.0.0                42233   0.000000e+00
+features.17.conv.0.0                42232   0.000000e+00
+features.17.conv.0.0                42231   0.000000e+00
+features.17.conv.0.0                42241   0.000000e+00
+features.17.conv.0.0                42229   0.000000e+00
+features.17.conv.0.0                42228   0.000000e+00
+features.17.conv.0.0                42227   0.000000e+00
+features.17.conv.0.0                42226   0.000000e+00
+features.17.conv.0.0                42225   0.000000e+00
+features.17.conv.0.0                42224   0.000000e+00
+features.17.conv.0.0                42258   0.000000e+00
+features.17.conv.0.0                42268   0.000000e+00

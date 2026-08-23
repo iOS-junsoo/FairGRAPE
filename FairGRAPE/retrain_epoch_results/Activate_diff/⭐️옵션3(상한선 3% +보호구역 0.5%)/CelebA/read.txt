@@ -1,0 +1,9 @@
+확인 결과, 두 환경은 fairgrape와 fairgrape_cu128이고 핵심 차이는 PyTorch 스택 전체 버전입니다. Python(3.9.7), numpy(1.20.3), imgaug 등 나머지는 동일합니다.
+
+항목	fairgrape	fairgrape_cu128
+PyTorch	1.11.0	2.8.0+cu128
+torchvision	0.12.0	0.23.0
+CUDA 런타임	11.3	12.8
+cuDNN	8.2.0	9.10.2
+
+환경이 달라 결과도 다름. 따라서 fairgrape만 다시 돌려야함.

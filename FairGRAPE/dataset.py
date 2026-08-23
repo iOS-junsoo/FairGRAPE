@@ -74,7 +74,11 @@ def prepare_ImageNet(csv):
     annot_df.to_csv(csv)
 
 # races 라벨을 재정의하는 함수
-def relabel(frame, seven_races=True, drop_race=False):
+def relabel(frame, seven_races=True, drop_race=False, race_binary=False):
+
+    # race_binary는 White vs Non-White 병합, drop_race는 특정 인종 삭제 — 의미가 충돌한다.
+    if race_binary and drop_race:
+        raise ValueError("race_binary와 drop_race는 동시에 사용할 수 없습니다.")
 
     # race 라벨 재할당
     if 'race' in frame.columns:
@@ -85,6 +89,7 @@ def relabel(frame, seven_races=True, drop_race=False):
         frame.loc[frame['race'] == 'Southeast Asian', 'race'] = 4
         frame.loc[frame['race'] == 'Indian', 'race'] = 5
         frame.loc[frame['race'] == 'Middle Eastern', 'race'] = 6
+        frame.loc[frame['race'] == 'Others', 'race'] = 7  # UTKFace 전용 (csv/UTKFace_labels_full.csv)
 
     # gender 라벨
     if 'gender' in frame.columns:
@@ -99,8 +104,15 @@ def relabel(frame, seven_races=True, drop_race=False):
         age_lower = frame['age'].astype(str).str.extract(r'(\d+)', expand=False).astype(float)
         frame['age_bin'] = (age_lower >= AGE_BINARY_THRESHOLD).astype(int)
 
-    # 7개 인종이 아닌 경우, race 라벨을 합치거나 제거
-    if not seven_races and 'race' in frame.columns:
+    # White vs Non-White 이진 병합 (FSCL 'Caucasian or not' 정의, Others 포함).
+    # 층화 분할·소그룹 분석용으로 병합 전 라벨을 race_orig에 보존한다.
+    # race_orig 코드: 0=White, 1=Black, 3=East Asian, 5=Indian, 7=Others (위 문자열 맵 기준)
+    if race_binary and 'race' in frame.columns:
+        frame['race_orig'] = frame['race']
+        frame['race'] = (frame['race'] != 0).astype(int)
+
+    # 7개 인종이 아닌 경우, race 라벨을 합치거나 제거 (race_binary 시에는 이미 병합됐으므로 건너뜀)
+    if not seven_races and not race_binary and 'race' in frame.columns:
         # 여기서는 LFWA+(Indian, Latino 없음) & UTK(Latino 없음)과 비교하기 위해
         # White 0, Black 1, Asian 2, Indian 3 으로 설정
         # Latino (2)와 Middle Eastern (6) 제거
@@ -149,16 +161,60 @@ def add_imbalance(frame):
     frame = frame.reset_index(drop=True)
     return frame
 
+# FSCL(CVPR'22)식 편향 주입: train만 재표집해 그룹×성별 상관을 인위적으로 만든다.
+# White(race=0)는 male:female = beta:1, Non-White(race=1)는 1:beta.
+# gender 코딩은 relabel 기준 0=Male, 1=Female. 데이터 추가는 불가하므로 다수 쪽을 다운샘플한다.
+# race_binary 병합 후 프레임 전용 (race ∈ {0,1}).
+def apply_fscl_skew(train_frame, beta, seed=42):
+    if beta <= 1:
+        raise ValueError(f"skew 비율 beta는 1보다 커야 합니다. 현재: {beta}")
+    if not set(train_frame['race'].unique()) <= {0, 1}:
+        raise ValueError("apply_fscl_skew는 race ∈ {0,1} (race_binary) 프레임 전용입니다.")
+
+    rng = np.random.RandomState(seed)
+    parts = []
+    for r in sorted(train_frame['race'].unique()):
+        males = train_frame[(train_frame['race'] == r) & (train_frame['gender'] == 0)]
+        females = train_frame[(train_frame['race'] == r) & (train_frame['gender'] == 1)]
+        target = beta if r == 0 else 1.0 / beta  # 목표 male:female 비율
+        if len(males) > target * len(females):
+            n_m, n_f = int(round(target * len(females))), len(females)
+        else:
+            n_m, n_f = len(males), int(round(len(males) / target))
+        parts.append(males.iloc[rng.permutation(len(males))[:n_m]])
+        parts.append(females.iloc[rng.permutation(len(females))[:n_f]])
+        print(f"[skew β={beta}] race={r}: male {len(males)}→{n_m}, female {len(females)}→{n_f} "
+              f"(m:f = {n_m / max(n_f, 1):.2f})")
+
+    out = pd.concat(parts)
+    out = out.iloc[rng.permutation(len(out))].reset_index(drop=True)
+    print(f"[skew β={beta}] train {train_frame.shape[0]} → {out.shape[0]}행")
+    return out
+
+# 평가셋 균형화: (race × gender) 각 셀을 최소 셀 크기로 다운샘플해 완전 균형으로 만든다.
+# FSCL 프로토콜의 'val/test는 그룹×클래스 완전 균형' 재현용 (Phase 2 전용).
+def make_balanced_eval(frame, seed=42):
+    rng = np.random.RandomState(seed)
+    cell_sizes = frame.groupby(['race', 'gender']).size()
+    n_min = int(cell_sizes.min())
+    parts = []
+    for _, sub in frame.groupby(['race', 'gender']):
+        parts.append(sub.iloc[rng.permutation(len(sub))[:n_min]])
+    out = pd.concat(parts).reset_index(drop=True)
+    print(f"[balanced eval] 셀 크기:\n{cell_sizes.to_string()}\n→ 셀당 {n_min}개, 총 {out.shape[0]}행")
+    return out
+
 # csv 파일을 불러와서 new_face_dir 에 저장된 이미지와 매핑, 그리고 train/val/test로 분할
-def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=False, imbalance=False):
+def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=False, imbalance=False,
+               race_binary=False, stratify=False, split_csv_out=None):
     frame = pd.read_csv(csv)
     frame.head()
 
-    frame = relabel(frame, seven_races, drop_race)
+    frame = relabel(frame, seven_races, drop_race, race_binary=race_binary)
 
     # 라벨 컬럼 정수 dtype 보장: relabel의 .loc 대입은 object dtype으로 남을 수 있어
     # 라벨 텐서화(torch.from_numpy(np.asarray(...)))가 깨지는 것을 방지한다. 값은 불변.
-    for c in ['race', 'gender', 'age_bin']:
+    for c in ['race', 'gender', 'age_bin', 'race_orig']:
         if c in frame.columns:
             frame[c] = frame[c].astype(int)
 
@@ -187,24 +243,63 @@ def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=Fal
         print("{} out of {} faces are found in new dir!".format(faces_found, initial_rows))
 
     image_name_frame = frame['image_name'].apply(split_image_name)
-    image_names = image_name_frame.unique()
-    np.random.seed(42)
-    image_names = np.random.permutation(image_names)
 
-    n_images = len(image_names)
-    n_train = int(train_pct * n_images)
-    n_val = int((n_images - n_train) / 2)
-    n_test = n_images - n_train - n_val
+    if stratify:
+        # (gender × 원본 race) 층화 무작위 8:1:1 분할. 셀별로 seed 42 셔플 후 비율대로 나눠
+        # 3분할 모두에서 소그룹 비율을 보존한다 (race_binary 시 race_orig=병합 전 5범주 기준).
+        # 행 단위 분할이므로 이미지당 얼굴이 1개(행:이미지 = 1:1)인 데이터셋 전용 (UTKFace 등).
+        if image_name_frame.nunique() != frame.shape[0]:
+            raise ValueError("stratify=True는 이미지당 1행인 데이터셋에서만 사용할 수 있습니다.")
+        race_col = 'race_orig' if 'race_orig' in frame.columns else 'race'
+        strat_cols = [c for c in ['gender', race_col] if c in frame.columns]
+        rng = np.random.RandomState(42)
+        split = pd.Series('train', index=frame.index)
+        for _, cell_idx in sorted(frame.groupby(strat_cols).groups.items()):
+            cell_idx = rng.permutation(np.asarray(cell_idx))
+            n = len(cell_idx)
+            n_tr = int(train_pct * n)
+            n_v = int((n - n_tr) / 2)
+            split.loc[cell_idx[n_tr:n_tr + n_v]] = 'val'
+            split.loc[cell_idx[n_tr + n_v:]] = 'test'
 
-    image_names_train = image_names[0:n_train]
-    image_names_val = image_names[n_train:n_train + n_val]
-    image_names_test = image_names[n_train + n_val:]
+        train_frame = frame[split == 'train'].reset_index(drop=True)
+        val_frame = frame[split == 'val'].reset_index(drop=True)
+        test_frame = frame[split == 'test'].reset_index(drop=True)
+        print("{} images: {} training, {} validation, {} test (stratified by {})".format(
+            frame.shape[0], train_frame.shape[0], val_frame.shape[0], test_frame.shape[0], strat_cols))
 
-    print("{} images: {} training, {} validation, {} test".format(n_images, len(image_names_train), len(image_names_val), len(image_names_test)))
+        # 층화 검증: 3분할 각각의 셀 비율이 전체 비율과 근사한지 출력
+        report = pd.DataFrame({
+            'all': frame.groupby(strat_cols).size() / frame.shape[0],
+            'train': train_frame.groupby(strat_cols).size() / train_frame.shape[0],
+            'val': val_frame.groupby(strat_cols).size() / val_frame.shape[0],
+            'test': test_frame.groupby(strat_cols).size() / test_frame.shape[0],
+        })
+        print("[stratify] 셀 비율 (전체 vs 분할):\n", report.round(4).to_string())
 
-    train_frame = frame[image_name_frame.isin(image_names_train)].reset_index(drop=True)
-    val_frame = frame[image_name_frame.isin(image_names_val)].reset_index(drop=True)
-    test_frame = frame[image_name_frame.isin(image_names_test)].reset_index(drop=True)
+        if split_csv_out:
+            split_df = pd.DataFrame({'image_name': image_name_frame, 'split': split})
+            split_df.to_csv(split_csv_out, index=False)
+            print(f"[stratify] 분할 결과 저장: {split_csv_out}")
+    else:
+        image_names = image_name_frame.unique()
+        np.random.seed(42)
+        image_names = np.random.permutation(image_names)
+
+        n_images = len(image_names)
+        n_train = int(train_pct * n_images)
+        n_val = int((n_images - n_train) / 2)
+        n_test = n_images - n_train - n_val
+
+        image_names_train = image_names[0:n_train]
+        image_names_val = image_names[n_train:n_train + n_val]
+        image_names_test = image_names[n_train + n_val:]
+
+        print("{} images: {} training, {} validation, {} test".format(n_images, len(image_names_train), len(image_names_val), len(image_names_test)))
+
+        train_frame = frame[image_name_frame.isin(image_names_train)].reset_index(drop=True)
+        val_frame = frame[image_name_frame.isin(image_names_val)].reset_index(drop=True)
+        test_frame = frame[image_name_frame.isin(image_names_test)].reset_index(drop=True)
 
     # age 이진 라벨 분포 리포트 (threshold 판단용, train split 기준)
     if 'age_bin' in train_frame.columns:
@@ -351,6 +446,7 @@ class FaceDataset(Dataset):
         # label을 텐서로 변환
         return (image, torch.from_numpy(np.asarray(labels)))
 
+# 학습용 데이터로더와 테스트용 데이터로더를 만드는 함수
 def seed_worker(worker_id):
     """DataLoader 워커 프로세스의 RNG(numpy·random·imgaug)를 결정적으로 시드한다.
 
@@ -365,7 +461,6 @@ def seed_worker(worker_id):
     ia.seed(worker_seed)
 
 
-# 학습용 데이터로더와 테스트용 데이터로더를 만드는 함수
 def make_datasets(train_frame, val_frame, give_dataloader=True, batch_size=64, col_used=None):
     transform_train_data = transforms.Compose([
         ImgAugTransform(),

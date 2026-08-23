@@ -39,6 +39,7 @@ def _get_model_run_dir():
             alpha_lines.append(f"적용 알파: IMPT_TYPE1_ALPHA = {_prune.IMPT_TYPE1_ALPHA}")
         elif impt_type == 2:
             alpha_lines.append(f"적용 알파: IMPT_TYPE2_ALPHA = {_prune.IMPT_TYPE2_ALPHA}")
+            alpha_lines.append(f"정규화 방식 IMPT2_NORM = '{_prune.IMPT2_NORM}'")
             alpha_lines.append(f"keep_per_iter(iter당 유지율): {getattr(config, 'glo_keep_per_iter', None)}")
             alpha_lines.append(f"보호 비율 IMPT2_PROTECTION_RATIO(γ) = {_prune.IMPT2_PROTECTION_RATIO}")
             alpha_lines.append(f"레이어 최소 유지 IMPT2_MIN_KEEP_RATIO_PER_LAYER = {_prune.IMPT2_MIN_KEEP_RATIO_PER_LAYER}")
@@ -68,6 +69,33 @@ def _get_model_run_dir():
 
     print(f"[모델 저장 폴더 생성] {run_dir} (run_info.txt 기록 완료)")
     config.glo_model_run_dir = run_dir
+    return run_dir
+
+
+def _get_results_run_dir():
+    """retrain_epoch_results/임시 저장소/<dataset>_impt<impt>_seed<seed>_<생성 시각> 런 폴더를 반환.
+    프로세스당 한 번만 생성(config.glo_results_run_dir에 캐시).
+
+    여러 실험을 동시에 돌릴 때 BEST_MODEL_SUMMARY/Total_info 파일이
+    retrain_epoch_results 바로 아래에 뒤섞여 구분이 안 되는 문제를 막기 위해
+    실험(프로세스)별로 결과 폴더를 분리한다. main_test.experiment()가 실험 시작 시 미리 호출한다.
+    """
+    import config
+
+    run_dir = getattr(config, 'glo_results_run_dir', None)
+    if run_dir:
+        return run_dir
+
+    dataset = getattr(config, 'glo_dataset', None) or 'unknown'
+    impt_type = getattr(config, 'glo_impt_type', None)
+    seed = getattr(config, 'glo_seed', None)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join('retrain_epoch_results', '임시 저장소',
+                           f"{dataset}_impt{impt_type}_seed{seed}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    print(f"[결과 저장 폴더 생성] {run_dir}")
+    config.glo_results_run_dir = run_dir
     return run_dir
 
 
@@ -608,9 +636,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
            
             if phase == 'test':
                 #! 결과 저장
-                save_dir = 'retrain_epoch_results'
-                if not os.path.exists(save_dir):
-                    os.makedirs(save_dir, exist_ok=True)
+                save_dir = _get_results_run_dir()
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"Total_info_prune: {config.glo_prune_iter + 1}_retrain: {epoch + 1}_output_{timestamp}.txt"
                 file_path = os.path.join(save_dir, filename)
@@ -697,10 +723,8 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
 
     # 🔥 베스트 모델 최종 결과 저장
     import config
-    save_dir = 'retrain_epoch_results'
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir, exist_ok=True)
-    
+    save_dir = _get_results_run_dir()
+
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     alpha = getattr(config, 'glo_imp_rate', None)
     use_grl = getattr(config, 'glo_use_grl', use_debiasing)
@@ -718,6 +742,15 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         f.write(f"총 재학습 에폭 수: {num_epochs}\n")
         f.write(f"Seed: {seed}\n")
         f.write(f"Alpha: {alpha}\n")
+        # impt_type과 점수 정규화 방식 기록 (norm은 impt 2/3에서만 의미 있음)
+        _impt_type = getattr(config, 'glo_impt_type', None)
+        try:
+            import prune as _prune
+            _norm = {2: _prune.IMPT2_NORM, 3: _prune.IMPT3_NORM}.get(_impt_type)
+        except Exception:  # noqa: BLE001
+            _norm = None
+        f.write(f"Impt Type: {_impt_type}\n")
+        f.write(f"Norm: {_norm if _norm is not None else '해당 없음'}\n")
         f.write(f"GRL Enabled: {use_grl}\n")
         f.write("\n")
         f.write("-"*80 + "\n")

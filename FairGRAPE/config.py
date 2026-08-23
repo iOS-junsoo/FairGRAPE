@@ -21,4 +21,9 @@ glo_use_grl = True # GRL 기반 debiasing 사용 여부
 glo_n_groups = 2 # 민감그룹 수 (gender=2, UTKFace race=4). main_test.experiment()에서 설정됨.
 glo_keep_per_iter = None # impt_type=2 채널 프루닝의 iter당 유지율. main_test에서 --keep_per_iter 값으로 설정. None이면 prune.py의 IMPT2_KEEP_PER_ITER 기본값 사용.
 glo_impt_type = None # --impt 값. main_test.experiment()에서 설정. save_models run_info.txt에 적용 알파를 기록할 때 사용.
+glo_dataset = None # --dataset 값. main_test.experiment()에서 설정. 결과 저장 폴더명에 사용.
+glo_seed = None # --seed 값. main_test.experiment()에서 설정. 결과 저장 폴더명에 사용.
+glo_results_run_dir = None # retrain_epoch_results/임시 저장소/<dataset>_impt<impt>_seed<seed>_<생성 시각> 런 폴더. train_and_val._get_results_run_dir()이 실험 시작 시 생성.
 glo_model_run_dir = None # save_models/<저장 시작 시각> 런 폴더 경로. train_and_val._get_model_run_dir()이 첫 저장 시 생성.
+glo_channel_log_run_dir = None # channel_pruning_logs/<dataset>_impt<impt>_seed<seed>_<첫 저장 시각> 런 폴더. prune._save_channel_pruning_log가 첫 저장 시 생성.
+glo_weight_log_run_dir = None # weight_pruning_logs/ 아래 동일 규칙 런 폴더 (impt_type=3). prune._save_weight_pruning_log가 첫 저장 시 생성.
