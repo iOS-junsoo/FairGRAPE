@@ -32,6 +32,8 @@ def experiment(args):
     prune_rate = args.prune_rate  # [0.5, 0.7, 0.8, 0.9, 0.99]
     batch_size = args.batch
     init_train = not args.no_init_train
+    if args.score_only:
+        init_train = False  # score_only는 점수 재계산 전용: 초기 학습 경로를 타지 않는다
     drop_race = args.drop_race  # util.make_frame() 참고
     race_binary = args.race_binary  # dataset.relabel() 참고 (White vs Non-White 이진 병합)
     skew_beta = args.skew_beta  # dataset.apply_fscl_skew() 참고 (Phase 2 편향 주입)
@@ -97,9 +99,10 @@ def experiment(args):
     elif dataset == 'UTKFace':
         csv = 'csv/UTKFace_labels.csv'
         face_dir = 'Images/UTKFace'
-        # race_binary(White vs Non-White) 모드 가드: race 태스크·drop_race와는 의미가 충돌한다.
-        if race_binary and loss_type not in ('gender', 'age'):
-            raise ValueError(f"--race_binary는 loss_type gender/age에서만 사용할 수 있습니다. 현재: {loss_type}")
+        # race_binary(White vs Non-White) 모드 가드: drop_race와는 의미가 충돌한다.
+        # loss_type race와 함께 쓰면 타겟이 W/Non-W 2클래스 분류가 된다 (민감속성=gender 구도용).
+        if race_binary and loss_type not in ('gender', 'age', 'race'):
+            raise ValueError(f"--race_binary는 loss_type gender/age/race에서만 사용할 수 있습니다. 현재: {loss_type}")
         if race_binary and drop_race:
             raise ValueError("--race_binary와 --drop_race는 동시에 사용할 수 없습니다.")
         if race_binary:
@@ -108,7 +111,9 @@ def experiment(args):
         download_dataset(dataset, face_dir)
         # 학습에 사용될 변수 설정
         if loss_type == 'race':
-            total_classes, output_cols_each_task, col_used_training = 4, [(0, 4)], [loss_type]
+            # race_binary 시 White vs Non-White 2클래스, 아니면 4클래스(White/Black/Asian/Indian)
+            n_race_classes = 2 if race_binary else 4
+            total_classes, output_cols_each_task, col_used_training = n_race_classes, [(0, n_race_classes)], [loss_type]
         elif loss_type == 'gender':
             total_classes, output_cols_each_task, col_used_training = 2, [(0, 2)], [loss_type]
         elif loss_type == 'age':
@@ -305,7 +310,9 @@ def experiment(args):
     best_model = best_model.to(device)
     """
     # 체크포인트 로드
-    if checkpoint is not None:
+    # (--score_only는 마스크(*.mask) 키가 포함된 프루닝 체크포인트를 다루므로,
+    #  prunner.init_mask()로 mask 파라미터가 등록된 뒤에 로드한다 → 아래 score_only 블록 참고)
+    if checkpoint is not None and not args.score_only:
         print("체크포인트 로드:", checkpoint)
         checkpoint_data = torch.load(checkpoint)
         
@@ -349,6 +356,112 @@ def experiment(args):
 
         # update_model 등 추가 작업이 필요하다면
         prunner.update_model(best_model)
+
+    # -----------------------
+    # (score_only) 저장된 프루닝 체크포인트의 채널별 perf/φ 기여도만 재계산하고 종료
+    #   사용 예: python main_test.py --score_only --checkpoint save_models/<런>/BEST_MODEL_prune_05_....pt \
+    #            + 해당 런의 run_info.txt에 기록된 나머지 인자 그대로
+    #   결과: channel_score_recompute/<체크포인트명>_<시각>/ 아래
+    #         iter 로그 txt + 전체 채널 점수 CSV(_channels.csv) + 통계 요약(score_summary.txt)
+    # -----------------------
+    if args.score_only:
+        if prune_type != 'FairGRAPE':
+            raise ValueError('--score_only는 prune_type=FairGRAPE에서만 지원합니다.')
+        if checkpoint is None:
+            raise ValueError('--score_only에는 --checkpoint(save_models의 .pt)가 필요합니다.')
+
+        print("[score_only] 체크포인트 로드:", checkpoint)
+        ck = torch.load(checkpoint, map_location=device)
+        state = ck.get('model_state_dict', ck.get('model_state', ck)) if isinstance(ck, dict) else ck
+        # init_mask()가 mask 파라미터를 등록해 두었으므로 *.mask 키까지 그대로 복원된다.
+        best_model.load_state_dict(state)
+        # ⚠ Prunner.update_model()은 deepcopy로 내부 복사본(self.model)을 만들므로,
+        #   로드된 가중치·마스크를 prunner 점수 계산 모델에 반영하려면 반드시 다시 동기화해야 한다.
+        #   (본 파이프라인도 재학습 후 같은 방식으로 동기화함 — 아래 루프의 prunner.update_model 참고)
+        prunner.update_model(best_model)
+
+        # 복원 검증: 마스크 기준 sparsity 출력 (체크포인트가 실제 반영됐는지 육안 확인용)
+        _mask_total = _mask_zero = 0
+        for _l in best_model.modules():
+            _m = getattr(_l, 'mask', None)
+            if _m is not None:
+                _mask_total += _m.numel()
+                _mask_zero += int((_m == 0).sum().item())
+        print(f"[score_only] 복원된 마스크 sparsity: {_mask_zero}/{_mask_total} "
+              f"= {(_mask_zero / _mask_total * 100) if _mask_total else 0:.1f}% "
+              f"(0%로 나오면 체크포인트 미반영 의심)")
+
+        # 체크포인트의 prune_iteration을 로그 iter 번호로 사용 (이 모델 상태에서 "다음" 프루닝이 보는 점수)
+        saved_iter = ck.get('prune_iteration') if isinstance(ck, dict) else None
+        config.glo_prune_iter = int(saved_iter) if saved_iter is not None else 0
+
+        # 실제 프루닝 런 로그(channel_pruning_logs)와 섞이지 않게 재계산 전용 폴더에 저장
+        # 폴더명: <실행 시각>_<데이터셋_알파값>_<정규화 방법>_<체크포인트 파일명>
+        from prune import IMPT_TYPE2_ALPHA as _so_alpha, IMPT2_NORM as _so_norm
+        ckpt_tag = os.path.splitext(os.path.basename(checkpoint))[0][:60]
+        stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        config.glo_channel_log_run_dir = os.path.join(
+            '/workspace/FairGRAPE/FairGRAPE/channel_score_recompute',
+            f'{stamp}_{dataset}_alpha{_so_alpha}_{_so_norm}_{ckpt_tag}')
+        os.makedirs(config.glo_channel_log_run_dir, exist_ok=True)
+
+        print(f"[score_only] 채널 점수 재계산 시작 → {config.glo_channel_log_run_dir}")
+        prunner.prune(prune_cfgs, True)  # 점수 계산 + 로그/CSV 저장 (마스크 적용 결과는 사용하지 않음)
+
+        # ── 채널 점수 통계 요약: raw/정규화 perf·φ describe + α별 결합 점수 ──
+        run_dir = config.glo_channel_log_run_dir
+        csv_files = sorted(f for f in os.listdir(run_dir) if f.endswith('_channels.csv'))
+        if csv_files:
+            from prune import IMPT_TYPE2_ALPHA as _run_alpha
+            ch_df = pd.read_csv(os.path.join(run_dir, csv_files[-1]))
+            # pruned_before(이전 iter에 이미 제거)는 이번 점수가 정의되지 않으므로 통계에서 제외
+            act = ch_df[ch_df['status'] != 'pruned_before'].copy()
+
+            # raw 기여도에서 rank/max 두 정규화를 모두 계산 (prune.py 정의와 동일)
+            #  - rank: 레이어별 활성 채널 순위 백분위 (_rank_percentile: 최솟값→0, 최댓값→1, 동점은 등장 순서)
+            #  - max : 레이어별 x/(max+1e-12) (scale_score_tensor)
+            def _rank01(s):
+                return (s.rank(method='first') - 1) / (len(s) - 1) if len(s) > 1 else pd.Series(0.5, index=s.index)
+            for kind, col in (('perf', 'perf_raw'), ('phi', 'phi_raw')):
+                act[f'{kind}_rank_n'] = act.groupby('block')[col].transform(_rank01)
+                act[f'{kind}_max_n'] = act.groupby('block')[col].transform(lambda s: s / (s.max() + 1e-12))
+            alphas = (0.3, 0.5, 0.7, 0.9)
+            for norm in ('rank', 'max'):
+                act[f'score_{norm}'] = _run_alpha * act[f'perf_{norm}_n'] - (1.0 - _run_alpha) * act[f'phi_{norm}_n']
+                for a in alphas:
+                    act[f'score_{norm}_a{a}'] = a * act[f'perf_{norm}_n'] - (1.0 - a) * act[f'phi_{norm}_n']
+
+            lines = []
+            lines.append(f"체크포인트      : {checkpoint}")
+            lines.append(f"실행 알파       : {_run_alpha} (score = α·perf_n − (1−α)·phi_n)")
+            lines.append(f"전체 채널 수    : {len(ch_df)}  |  status 분포: {ch_df['status'].value_counts().to_dict()}")
+            lines.append("(아래 통계는 모두 활성 채널(pruned_before 제외) 기준. rank/max 정규화는 raw에서 각각 재계산한 값)")
+            lines.append("")
+            lines.append("[ 정규화 전 (raw) 기여도 통계 ]")
+            lines.append(act[['perf_raw', 'phi_raw']].describe().to_string())
+            for norm in ('rank', 'max'):
+                lines.append("")
+                lines.append(f"[ {norm} 정규화 기여도 통계 ]")
+                lines.append(act[[f'perf_{norm}_n', f'phi_{norm}_n']].describe().to_string())
+                lines.append("")
+                score_cols = [f'score_{norm}'] + [f'score_{norm}_a{a}' for a in alphas]
+                lines.append(f"[ {norm} 정규화 결합 점수 통계 (score_{norm}: 실행 α={_run_alpha}, _aX: α=X 재계산) ]")
+                lines.append(act[score_cols].describe().to_string())
+            lines.append("")
+            lines.append(f"채널별 전체 값은 CSV 참고: {os.path.join(run_dir, csv_files[-1])}")
+
+            text = "\n".join(lines)
+            print("\n" + "=" * 80 + "\n[score_only] 채널 점수 통계 요약\n" + "=" * 80)
+            print(text)
+            # rank/max 정규화값 + α별 결합 점수 컬럼을 포함한 활성 채널 CSV와 통계 요약을 함께 저장
+            act_out = os.path.join(run_dir, csv_files[-1].replace('_channels.csv', '_channels_both_norms.csv'))
+            act.to_csv(act_out, index=False)
+            with open(os.path.join(run_dir, 'score_summary.txt'), 'w', encoding='utf-8') as sf:
+                sf.write(text + "\n")
+            print(f"[score_only] 통계 요약 저장: {os.path.join(run_dir, 'score_summary.txt')}")
+
+        print("[score_only] 완료. 재학습/모델 저장 없이 종료합니다.")
+        return
 
 
 
@@ -744,6 +857,7 @@ if __name__ == "__main__":
     parser.add_argument('--skip_readable_check', action='store_true', help='dlib 기반 이미지 가독성 검사를 건너뜀')
     parser.add_argument('--race_binary', action='store_true', help='UTKFace 전용: race를 White(0) vs Non-White(1) 이진으로 병합 (Others 포함, csv/UTKFace_labels_full.csv + gender×race5 층화 분할 사용)')
     parser.add_argument('--skew_beta', type=float, default=0, help='UTKFace race_binary 전용: FSCL식 편향 주입 비율 β (>1). train을 White m:f=β:1 / Non-White 1:β로 재표집하고 val/test는 (race×gender) 4셀 균형으로 재구성. 0이면 비활성')
+    parser.add_argument('--score_only', action='store_true', help='저장된 프루닝 체크포인트(--checkpoint)의 채널별 성능/공정성 기여도만 재계산해 channel_pruning_logs/score_only_*/에 저장하고 종료 (프루닝·재학습·모델 저장 없음)')
 
 
 

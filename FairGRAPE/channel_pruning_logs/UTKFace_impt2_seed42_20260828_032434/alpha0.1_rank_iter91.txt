@@ -1,0 +1,79 @@
+================================================================================
+Channel Pruning Log
+  dataset    : UTKFace
+  impt_type  : 2
+  seed       : 42
+  iteration  : 91
+  alpha      : 0.1000
+  norm       : rank
+  timestamp  : 2026-08-28 12:12:51
+  remove_target  : 4359
+  accum_removed  : 4730
+  selected_channels : 10
+  gamma             : 0.0050
+  remove_target_met : yes
+  total_params   : 2192320
+  active_after   : 582662
+  model_sparsity : 73.4%
+================================================================================
+
+[ 레이어별 채널 제거 비율 ]
+  layer                total_ch  this_iter    cumul  cumul_%
+  ----------------------------------------------------------
+  features.1                 32          0       25    78.1%
+  features.2                 96          0       93    96.9%
+  features.3                144          0      139    96.5%
+  features.4                144          0      139    96.5%
+  features.5                192          0      186    96.9%
+  features.6                192          0      186    96.9%
+  features.7                192          0      186    96.9%
+  features.8                384          0      372    96.9%
+  features.9                384          0      372    96.9%
+  features.10               384          0      366    95.3%
+  features.11               384          0      372    96.9%
+  features.12               576          0      558    96.9%
+  features.13               576          0      557    96.7%
+  features.14               576          0      558    96.9%
+  features.15               960          0      905    94.3%
+  features.16               960          1      899    93.6%
+  features.17               960          9      737    76.8%
+
+[ 레이어별 보호 영역 (γ=0.0050) ]
+  layer                  active  protected  protect_%
+  --------------------------------------------------
+  features.1                  7          1      14.3%
+  features.2                  3          1      33.3%
+  features.3                  5          1      20.0%
+  features.4                  5          1      20.0%
+  features.5                  6          1      16.7%
+  features.6                  6          1      16.7%
+  features.7                  6          1      16.7%
+  features.8                 12          1       8.3%
+  features.9                 12          1       8.3%
+  features.10                18          1       5.6%
+  features.11                12          1       8.3%
+  features.12                18          1       5.6%
+  features.13                19          1       5.3%
+  features.14                18          1       5.6%
+  features.15                55          1       1.8%
+  features.16                62          1       1.6%
+  features.17               232          2       0.9%
+
+[ 블록별 제거 채널 수 ]
+  features.16: 1채널 제거
+  features.17: 9채널 제거
+
+[ 선택된 채널 상세 ]
+  (phi/perf: raw, phi_n/perf_n: 정규화 후 값 — score = α·perf_n − (1−α)·phi_n)
+block                             ch        score          phi         perf    phi_n   perf_n  weights
+----------------------------------------------------------------------------------------------------
+features.17                      626    -0.836364 1.492664e-06 6.000570e-07   0.9870   0.5195      489
+features.17                      220    -0.823810 1.288684e-06 3.196695e-07   0.9567   0.3723      489
+features.16                      794    -0.818033 7.098044e-07 7.922829e-05   1.0000   0.8197      329
+features.17                        8    -0.812987 1.250011e-06 3.124386e-07   0.9437   0.3636      489
+features.17                      330    -0.803896 2.805555e-06 8.642426e-06   1.0000   0.9610      489
+features.17                      171    -0.802597 1.736455e-06 6.521427e-06   0.9957   0.9351      489
+features.17                      176    -0.800433 1.213078e-06 4.557819e-07   0.9394   0.4502      489
+features.17                      526    -0.798268 1.482611e-06 1.945437e-06   0.9740   0.7835      489
+features.17                      906    -0.795238 1.726557e-06 9.872632e-06   0.9913   0.9697      489
+features.17                      337    -0.793074 1.489160e-06 4.879292e-06   0.9827   0.9134      489

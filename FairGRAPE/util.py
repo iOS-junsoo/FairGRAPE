@@ -323,6 +323,10 @@ def print_acc_scores(fair_df, col_used=['race'], sensitive_group="gender"):
     전체 정확도와, 민감 속성별 정확도를 계산해 반환합니다.
     반환 형식: {"acc": overall_accuracy, "acc_each_group": [...]}
     """
+    # check_fairness0가 만든 fair_df에는 민감속성 컬럼이 중복으로 들어올 수 있어
+    # (예: 타겟=race·민감=gender 시 'gender' 2개) 그대로 인덱싱하면
+    # DataFrame이 반환되며 reindex 오류가 난다 → calc_equalized_odds와 동일하게 선제 제거.
+    fair_df = fair_df.loc[:, ~fair_df.columns.duplicated()]
     unq_groups = list(set(fair_df[sensitive_group]))
     # 타입을 통일해서 정렬 (모두 문자열로 변환)
     unq_groups = [str(g) for g in unq_groups]

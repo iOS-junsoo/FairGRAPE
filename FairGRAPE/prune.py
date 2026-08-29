@@ -29,7 +29,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.9
+IMPT_TYPE2_ALPHA = 0.5
 IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정성 혼합 가중치. 직접 수정하면 됨.
 # impt_type=3 정규화 방식. 'rank': 블록 내 활성 가중치의 순위 백분위(0~1) — perf/φ 분포 모양과
 # 무관하게 같은 스케일이 되어 alpha가 실제 혼합 비율로 작동. 'max': 기존 블록 max 나눗셈
@@ -1321,6 +1321,7 @@ def _save_channel_pruning_log(
     active_per_layer=None,
     phi_scaled_by_layer=None,
     perf_scaled_by_layer=None,
+    protected_set=None,
 ):
     import datetime
     import config as _config
@@ -1454,6 +1455,55 @@ def _save_channel_pruning_log(
             )
 
     print(f"[채널 pruning 로그 저장] {filepath}")
+
+    # ── 전체 채널 CSV 덤프 (제거된 채널뿐 아니라 활성/보호/기제거 채널 전부) ──
+    # status: pruned_now(이번 iter 제거) / protected(γ 보호) / active(생존) / pruned_before(이전 iter에 제거됨)
+    csv_path = filepath[:-4] + '_channels.csv'
+    selected_set = set(selected_channels)
+    protected_set = protected_set or set()
+    with open(csv_path, 'w', encoding='utf-8') as f:
+        f.write("iter,block,ch,status,score,phi_raw,perf_raw,phi_n,perf_n,weights\n")
+        for conv1_name in sorted(phi_by_layer.keys(),
+                                 key=lambda n: int(n.split('.')[1]) if n.split('.')[1].isdigit() else 99):
+            if conv1_name == 'features.18.0':
+                continue  # 프루닝 대상 아님 (본문 선택 로직과 동일)
+            phi_vec = phi_by_layer[conv1_name]
+            perf_vec = perf_by_layer.get(conv1_name)
+            if perf_vec is None or perf_vec.shape != phi_vec.shape:
+                continue
+            block_name = conv1_name.rsplit('.conv.', 1)[0]
+            for channel_k in range(len(phi_vec)):
+                key = (block_name, channel_k)
+                weight_count = _count_channel_weights(model, block_name, channel_k) if model is not None else -1
+                if weight_count == 0:
+                    status = 'pruned_before'
+                elif key in selected_set:
+                    status = 'pruned_now'
+                elif key in protected_set:
+                    status = 'protected'
+                else:
+                    status = 'active'
+
+                phi_n_val = perf_n_val = float('nan')
+                if phi_scaled_by_layer is not None and conv1_name in phi_scaled_by_layer:
+                    phi_n_val = phi_scaled_by_layer[conv1_name][channel_k].item()
+                if perf_scaled_by_layer is not None and conv1_name in perf_scaled_by_layer:
+                    perf_n_val = perf_scaled_by_layer[conv1_name][channel_k].item()
+
+                if key in score_by_channel_dict:
+                    score = score_by_channel_dict[key][0]
+                elif status == 'pruned_before':
+                    score = float('nan')  # 이미 제거된 채널: 이번 iter 점수 없음
+                else:
+                    # 보호 채널 등 후보 풀 밖 채널도 같은 식으로 점수 재구성
+                    score = alpha * perf_n_val - (1.0 - alpha) * phi_n_val
+
+                f.write(
+                    f"{prune_iter + 1},{block_name},{channel_k},{status},{score:.6f},"
+                    f"{phi_vec[channel_k].item():.6e},{perf_vec[channel_k].item():.6e},"
+                    f"{phi_n_val:.4f},{perf_n_val:.4f},{weight_count}\n"
+                )
+    print(f"[전체 채널 점수 CSV 저장] {csv_path}")
 
 
 
@@ -2381,6 +2431,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             active_per_layer=active_per_layer,
             phi_scaled_by_layer=phi_scaled_by_layer_ch,
             perf_scaled_by_layer=perf_scaled_by_layer_ch,
+            protected_set=protected_set,
         )
 
         # 최종 마스크 리스트 반환 (layer 순서 유지)
