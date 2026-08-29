@@ -43,6 +43,7 @@ def _get_model_run_dir():
             alpha_lines.append(f"keep_per_iter(iter당 유지율): {getattr(config, 'glo_keep_per_iter', None)}")
             alpha_lines.append(f"보호 비율 IMPT2_PROTECTION_RATIO(γ) = {_prune.IMPT2_PROTECTION_RATIO}")
             alpha_lines.append(f"레이어 최소 유지 IMPT2_MIN_KEEP_RATIO_PER_LAYER = {_prune.IMPT2_MIN_KEEP_RATIO_PER_LAYER}")
+            alpha_lines.append(f"층별 제거 상한 IMPT2_LAYER_CAP_MULTIPLIER = {_prune.IMPT2_LAYER_CAP_MULTIPLIER}")
         elif impt_type == 3:
             alpha_lines.append(f"적용 알파: IMPT_TYPE3_ALPHA = {_prune.IMPT_TYPE3_ALPHA}")
             alpha_lines.append(f"정규화 방식 IMPT3_NORM = '{_prune.IMPT3_NORM}'")

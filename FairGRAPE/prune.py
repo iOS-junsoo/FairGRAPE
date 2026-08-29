@@ -37,8 +37,12 @@ IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정
 IMPT3_NORM = 'rank'
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 # IMPT2_KEEP_PER_ITER = 0.975  # → 명령어 인자 --keep_per_iter (config.glo_keep_per_iter)로 대체됨. 이 값을 바꿔도 반영 안 됨.
-IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03  # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 3%는 유지
+IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.08  # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 8%는 유지 (직전 floor 8% 실험과 동일 조건)
 IMPT2_PROTECTION_RATIO  =0.005  # impt_type=2/3: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
+# impt_type=2: 한 iter에서 층별 제거 가중치 상한 배수. None이면 비활성(기존 동작과 완전 동일).
+# cap[bn] = 배수 × remove_target × (층 bn의 후보 가중치 합 / candidate_channel_weights)
+# 상한 도달 층의 채널은 전역 선택에서 스킵되고, 목표 미달 시 상한만 풀어(floor 유지) 2차 패스로 채운다.
+IMPT2_LAYER_CAP_MULTIPLIER = 2.0
 # impt_type=2 정규화 방식. 'rank': 활성 채널의 순위 백분위(0~1) — perf가 제곱 heavy-tail이라
 # max 나눗셈은 벌크가 0으로 붕괴해 alpha가 실효 혼합비로 작동하지 못함(2026-08-21 진단:
 # max에서 α=0.7이어도 perf:φ 실효 기여 0.22:1, rank에서는 2.33:1로 설계대로 동작).
@@ -1322,6 +1326,15 @@ def _save_channel_pruning_log(
     phi_scaled_by_layer=None,
     perf_scaled_by_layer=None,
     protected_set=None,
+    cap_multiplier=None,
+    per_layer_cap=None,
+    per_layer_candidate_weights=None,
+    skipped_by_cap=None,
+    skipped_by_floor=None,
+    pass2_floor_blocked=None,
+    per_layer_removed_w=None,
+    cap_relaxed_set=None,
+    cap_relaxed_removed=0,
 ):
     import datetime
     import config as _config
@@ -1371,6 +1384,12 @@ def _save_channel_pruning_log(
         f.write(f"  selected_channels : {len(selected_channels)}\n")
         if gamma is not None:
             f.write(f"  gamma             : {gamma:.4f}\n")
+        # cap_multiplier는 비활성(None)이어도 항상 기록 — 로그 생성 코드 버전의 사후 식별용
+        f.write(f"  cap_multiplier    : {cap_multiplier}\n")
+        if cap_multiplier is not None:
+            f.write(f"  cap_deferred(1차 상한 스킵) : {sum((skipped_by_cap or {}).values())}\n")
+            f.write(f"  cap_relaxed_channels        : {len(cap_relaxed_set or ())}\n")
+            f.write(f"  cap_relaxed_removed         : {cap_relaxed_removed}\n")
         f.write(f"  remove_target_met : {'yes' if accum_removed >= remove_target else 'NO (γ/floor 제약)'}\n")
         if model_sparsity is not None:
             f.write(f"  total_params   : {total_model_params}\n")
@@ -1405,6 +1424,32 @@ def _save_channel_pruning_log(
                 protected = (protected_per_layer or {}).get(block_name, 0)
                 pct = (protected / active * 100) if active > 0 else 0.0
                 f.write(f"  {block_name:<20} {active:>8} {protected:>10} {pct:>9.1f}%\n")
+            f.write("\n")
+
+        # 층별 제거 상한 현황 (cap 활성 시에만 — 비활성 로그는 기존 포맷 그대로)
+        if cap_multiplier is not None:
+            relaxed_per_layer = defaultdict(int)
+            for bn, _ch in (cap_relaxed_set or ()):
+                relaxed_per_layer[bn] += 1
+            f.write(f"[ 층별 제거 상한 (cap_multiplier={cap_multiplier}, 후보 가중치 비례 배분) ]\n")
+            f.write(
+                f"  {'layer':<16} {'cand_w':>10} {'cap_w':>10} {'removed_1차':>11} "
+                f"{'relaxed_2차':>11} {'skip_cap':>9} {'skip_floor_1차':>14} {'skip_floor_2차':>14}\n"
+            )
+            f.write("  " + "-" * 100 + "\n")
+            for block_num in range(1, 18):
+                block_name = f'features.{block_num}'
+                cand_w = (per_layer_candidate_weights or {}).get(block_name, 0)
+                cap_w = (per_layer_cap or {}).get(block_name)
+                cap_str = f"{cap_w:.0f}" if cap_w is not None else 'N/A'
+                f.write(
+                    f"  {block_name:<16} {cand_w:>10} {cap_str:>10} "
+                    f"{(per_layer_removed_w or {}).get(block_name, 0):>11} "
+                    f"{relaxed_per_layer.get(block_name, 0):>11} "
+                    f"{(skipped_by_cap or {}).get(block_name, 0):>9} "
+                    f"{(skipped_by_floor or {}).get(block_name, 0):>14} "
+                    f"{(pass2_floor_blocked or {}).get(block_name, 0):>14}\n"
+                )
             f.write("\n")
 
         # 블록별 요약
@@ -1448,16 +1493,18 @@ def _save_channel_pruning_log(
                     and channel_k < len(perf_scaled_by_layer[conv1_name])):
                 perf_n_val = perf_scaled_by_layer[conv1_name][channel_k].item()
 
+            relaxed_tag = ' relaxed' if cap_relaxed_set and key in cap_relaxed_set else ''
             f.write(
                 f"{block_name:<30} {channel_k:>5} {score:>12.6f} "
                 f"{phi_val:>12.6e} {perf_val:>12.6e} "
-                f"{phi_n_val:>8.4f} {perf_n_val:>8.4f} {weight_count:>8}\n"
+                f"{phi_n_val:>8.4f} {perf_n_val:>8.4f} {weight_count:>8}{relaxed_tag}\n"
             )
 
     print(f"[채널 pruning 로그 저장] {filepath}")
 
     # ── 전체 채널 CSV 덤프 (제거된 채널뿐 아니라 활성/보호/기제거 채널 전부) ──
-    # status: pruned_now(이번 iter 제거) / protected(γ 보호) / active(생존) / pruned_before(이전 iter에 제거됨)
+    # status: pruned_now(이번 iter 제거) / pruned_now_relaxed(이번 iter 2차 패스[상한 해제]에서 제거)
+    #         / protected(γ 보호) / active(생존) / pruned_before(이전 iter에 제거됨)
     csv_path = filepath[:-4] + '_channels.csv'
     selected_set = set(selected_channels)
     protected_set = protected_set or set()
@@ -1477,6 +1524,8 @@ def _save_channel_pruning_log(
                 weight_count = _count_channel_weights(model, block_name, channel_k) if model is not None else -1
                 if weight_count == 0:
                     status = 'pruned_before'
+                elif cap_relaxed_set and key in cap_relaxed_set:
+                    status = 'pruned_now_relaxed'
                 elif key in selected_set:
                     status = 'pruned_now'
                 elif key in protected_set:
@@ -2372,6 +2421,12 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         gamma = float(IMPT2_PROTECTION_RATIO)
         if not 0.0 <= gamma <= 1.0:
             raise ValueError(f"IMPT2_PROTECTION_RATIO는 0~1 사이여야 합니다. 현재: {gamma}")
+        if IMPT2_LAYER_CAP_MULTIPLIER is not None and IMPT2_LAYER_CAP_MULTIPLIER <= 0:
+            # 0이면 전 층 cap=0.0 → 1차 패스가 전 채널을 스킵하고 2차 패스가 전부 담당하는 퇴화 동작
+            raise ValueError(
+                f"IMPT2_LAYER_CAP_MULTIPLIER는 None(비활성) 또는 양수여야 합니다. "
+                f"현재: {IMPT2_LAYER_CAP_MULTIPLIER}"
+            )
 
         print(f"impt_type == 2: protection_ratio (γ)={gamma:.4f} 적용 — 각 레이어 perf 상위 γ% 보호")
         protected_set, protected_per_layer, active_per_layer = _compute_protected_channels(
@@ -2452,6 +2507,20 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             f"candidates={len(score_by_channel)}"
         )
 
+        # ── iter당 층별 제거 상한: remove_target을 층별 후보 가중치 규모에 비례 배분 × 배수 ──
+        # cap은 float 유지(반올림 금지): 후보가 있는 층은 cap>0이 보장되어, "미달이면 제거 허용"
+        # 판정(per_layer_removed_w >= cap이면 스킵) 하에서 모든 층이 최소 1채널은 잘릴 수 있다.
+        per_layer_cap = None
+        per_layer_cand_w = None
+        if IMPT2_LAYER_CAP_MULTIPLIER is not None:
+            per_layer_cand_w = defaultdict(int)
+            for _s, _bn, _k, _w in score_by_channel:
+                per_layer_cand_w[_bn] += _w
+            per_layer_cap = {
+                bn: IMPT2_LAYER_CAP_MULTIPLIER * remove_target * (w / candidate_channel_weights)
+                for bn, w in per_layer_cand_w.items()
+            }
+
         # ── 레이어별 최소 유지량 계산 (원본 채널 × IMPT2_MIN_KEEP_RATIO_PER_LAYER) ──
         import math as _math
         modules = dict(model.named_modules())
@@ -2480,6 +2549,9 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         accum_removed = 0
         per_layer_select_count = defaultdict(int)
         skipped_by_floor = defaultdict(int)
+        per_layer_removed_w = defaultdict(int)  # 1차 패스 층별 제거 가중치 (cap 판정용)
+        skipped_by_cap = defaultdict(int)
+        cap_deferred = []  # cap으로 미룬 후보 — 전역 점수 오름차순 그대로 쌓임
 
         if remove_target > 0:
             sorted_all = sorted(score_by_channel, key=lambda x: x[0])
@@ -2495,11 +2567,48 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 
                 if remaining_after < min_keep:
                     # 이 채널을 제거하면 해당 레이어 최소 유지량 미만 → 스킵
+                    # (floor는 iter 내 영구 제약이라 cap보다 먼저 검사 — cap_deferred에는
+                    #  오직 cap 때문에만 미뤄진 채널만 남는다)
                     skipped_by_floor[block_name] += 1
+                    continue
+
+                # 층별 제거 상한: 이미 상한 이상 제거한 층은 스킵하고 2차 패스 후보로 미룸.
+                # 판정은 "미달이면 허용"(마지막 채널만큼 초과 가능) — 전역 remove_target 판정과 동일 의미론.
+                # per_layer_cap은 후보가 있는 층에 반드시 키가 있음 → direct indexing (불변식 검증 겸용)
+                if per_layer_cap is not None and per_layer_removed_w[block_name] >= per_layer_cap[block_name]:
+                    skipped_by_cap[block_name] += 1
+                    cap_deferred.append((score, block_name, channel_k, weight_count))
                     continue
 
                 selected_channels.append((block_name, channel_k))
                 accum_removed += weight_count
+                per_layer_select_count[block_name] += 1
+                if per_layer_cap is not None:
+                    per_layer_removed_w[block_name] += weight_count
+
+        # ── 2차 패스: cap 때문에 목표 미달이면 상한만 풀고(floor 유지) 점수순으로 마저 채움 ──
+        cap_relaxed_set = set()
+        cap_relaxed_removed = 0
+        pass2_floor_blocked = defaultdict(int)
+        if per_layer_cap is not None and accum_removed < remove_target and cap_deferred:
+            for score, block_name, channel_k, weight_count in cap_deferred:
+                if accum_removed >= remove_target:
+                    break
+
+                total_ch = per_layer_original_ch.get(block_name, 0)
+                min_keep = per_layer_min_keep.get(block_name, 0)
+                already_removed = per_layer_already_removed[block_name]
+                being_removed = per_layer_select_count[block_name]  # 1·2차 공유 → floor 산술 정확
+                remaining_after = total_ch - already_removed - being_removed - 1
+
+                if remaining_after < min_keep:
+                    pass2_floor_blocked[block_name] += 1  # skipped_by_floor와 별도 집계 (이중 계상 방지)
+                    continue
+
+                selected_channels.append((block_name, channel_k))
+                cap_relaxed_set.add((block_name, channel_k))
+                accum_removed += weight_count
+                cap_relaxed_removed += weight_count
                 per_layer_select_count[block_name] += 1
 
         # 제약으로 스킵된 레이어 로그
@@ -2508,6 +2617,17 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                 f"  [최소 유지 제약] layer={bn}, skipped={skipped_by_floor[bn]}, "
                 f"min_keep={per_layer_min_keep[bn]}/{per_layer_original_ch[bn]}"
             )
+        if per_layer_cap is not None:
+            for bn in sorted(skipped_by_cap.keys(), key=lambda x: int(x.split('.')[1])):
+                print(
+                    f"  [상한 제약] layer={bn}, skipped={skipped_by_cap[bn]}, "
+                    f"cap={per_layer_cap[bn]:.0f}, removed_1차={per_layer_removed_w[bn]}"
+                )
+            if cap_deferred:
+                print(
+                    f"  [상한 해제 2차 패스] selected={len(cap_relaxed_set)}, "
+                    f"removed={cap_relaxed_removed}, floor_재차단={sum(pass2_floor_blocked.values())}"
+                )
 
         # 레이어별 선택 현황 출력
         layer_select_count = defaultdict(int)
@@ -2567,6 +2687,15 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             phi_scaled_by_layer=phi_scaled_by_layer_ch,
             perf_scaled_by_layer=perf_scaled_by_layer_ch,
             protected_set=protected_set,
+            cap_multiplier=IMPT2_LAYER_CAP_MULTIPLIER,
+            per_layer_cap=per_layer_cap,
+            per_layer_candidate_weights=per_layer_cand_w,
+            skipped_by_cap=skipped_by_cap,
+            skipped_by_floor=skipped_by_floor,
+            pass2_floor_blocked=pass2_floor_blocked,
+            per_layer_removed_w=per_layer_removed_w,
+            cap_relaxed_set=cap_relaxed_set,
+            cap_relaxed_removed=cap_relaxed_removed,
         )
 
         # 최종 마스크 리스트 반환 (layer 순서 유지)
