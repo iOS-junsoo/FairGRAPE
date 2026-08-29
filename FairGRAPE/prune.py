@@ -1554,6 +1554,135 @@ def _rank_percentile(values: torch.Tensor) -> torch.Tensor:
     return ranks.to(values.dtype) / (n - 1)
 
 
+def _pearson_corr(x, y):
+    """두 1-D 텐서의 Pearson 상관계수. 분산이 0이면 NaN 반환."""
+    x = x.to(torch.float64)
+    y = y.to(torch.float64)
+    xc = x - x.mean()
+    yc = y - y.mean()
+    denom = xc.norm() * yc.norm()
+    if float(denom) == 0.0:
+        return float('nan')
+    return float((xc @ yc) / denom)
+
+
+def _save_phi_component_analysis(
+    gap_by_layer,
+    mean_grad_by_layer,
+    phi_by_layer,
+    log_dir='/workspace/FairGRAPE/FairGRAPE/phi_component_analysis',
+):
+    """φ = activation_gap × mean|activation_grad| 의 두 인자를 분리 저장하는 분석 로그.
+    --phi_analysis 플래그가 켜진 런에서만 호출된다. 프루닝 로직에는 영향 없음.
+
+    저장 대상: 프루닝 대상인 features.1~17 전 채널 (features.18은 프루닝 제외라 미포함).
+    (a) iterNN_components.csv : 채널별 raw 값 + 레이어 내 rank 백분위 + 중앙값 분할 4분면
+    (b) iterNN_summary.txt    : 레이어별 통계/상관 + 임계값별 불일치(한쪽 상위·한쪽 하위) 채널 집계"""
+    import datetime
+    import config as _config
+
+    log_dir = _get_pruning_log_run_dir(log_dir, 'glo_phi_analysis_run_dir')
+    prune_iter = getattr(_config, 'glo_prune_iter', 0)
+    csv_path = os.path.join(log_dir, f"iter{prune_iter + 1:02d}_components.csv")
+    summary_path = os.path.join(log_dir, f"iter{prune_iter + 1:02d}_summary.txt")
+
+    # 블록 순서대로 (block_name, ref_layer_name, gap, grad, phi, gap_rank, grad_rank) 수집
+    per_layer = []
+    for block_num in range(1, 18):
+        block_name = f'features.{block_num}'
+        conv0_name, conv1_name, _ = _get_impt_type2_block_layer_names(block_name)
+        ref_name = conv1_name if conv1_name is not None else conv0_name
+        if ref_name not in gap_by_layer:
+            continue
+        gap = gap_by_layer[ref_name].detach().to(torch.float64).cpu()
+        grad = mean_grad_by_layer[ref_name].detach().to(torch.float64).cpu()
+        phi = phi_by_layer[ref_name].detach().to(torch.float64).cpu()
+        per_layer.append((block_name, ref_name, gap, grad, phi,
+                          _rank_percentile(gap), _rank_percentile(grad)))
+
+    def _quadrant(gr, dr):
+        if gr >= 0.5:
+            return 'HH' if dr >= 0.5 else 'HL'
+        return 'LH' if dr >= 0.5 else 'LL'
+
+    # (a) 전 채널 CSV
+    with open(csv_path, 'w') as f:
+        f.write("block,ch,act_gap,act_grad,phi,gap_rank,grad_rank,quadrant\n")
+        for block_name, _, gap, grad, phi, gap_rank, grad_rank in per_layer:
+            for ch in range(gap.numel()):
+                f.write(
+                    f"{block_name},{ch},{gap[ch].item():.6e},{grad[ch].item():.6e},"
+                    f"{phi[ch].item():.6e},{gap_rank[ch].item():.6f},{grad_rank[ch].item():.6f},"
+                    f"{_quadrant(gap_rank[ch].item(), grad_rank[ch].item())}\n"
+                )
+
+    total_channels = sum(gap.numel() for _, _, gap, *_ in per_layer)
+
+    # (b) 요약 txt
+    with open(summary_path, 'w') as f:
+        f.write("=== phi 구성요소 분석 (activation_gap vs mean|activation_grad|) ===\n")
+        f.write(f"dataset: {getattr(_config, 'glo_dataset', None)}\n")
+        f.write(f"seed: {getattr(_config, 'glo_seed', None)}\n")
+        f.write(f"iteration: {prune_iter + 1}\n")
+        f.write(f"total_channels: {total_channels} (features.1~17, 프루닝 제외인 features.18 미포함)\n")
+        f.write(f"timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+        # 1) 레이어별 통계표
+        q = torch.tensor([0.25, 0.5, 0.75], dtype=torch.float64)
+        for title, idx in (("activation_gap (그래디언트 곱하기 전 raw 격차)", 2),
+                           ("mean|activation_grad| (배치 평균 절대 그래디언트)", 3)):
+            f.write(f"--- {title} 레이어별 통계 ---\n")
+            f.write(f"{'layer':<14}{'count':>7}{'mean':>13}{'std':>13}{'min':>13}"
+                    f"{'p25':>13}{'median':>13}{'p75':>13}{'max':>13}\n")
+            for row in per_layer:
+                v = row[idx]
+                p25, med, p75 = torch.quantile(v, q).tolist()
+                f.write(f"{row[0]:<14}{v.numel():>7}{v.mean().item():>13.4e}{v.std().item():>13.4e}"
+                        f"{v.min().item():>13.4e}{p25:>13.4e}{med:>13.4e}{p75:>13.4e}{v.max().item():>13.4e}\n")
+            f.write("\n")
+
+        # 2) 레이어별 상관 (Pearson: raw, Spearman: rank 백분위의 Pearson)
+        f.write("--- activation_gap vs mean|activation_grad| 상관 ---\n")
+        f.write(f"{'layer':<14}{'pearson_raw':>13}{'spearman':>13}\n")
+        all_gap_ranks, all_grad_ranks = [], []
+        for block_name, _, gap, grad, _, gap_rank, grad_rank in per_layer:
+            f.write(f"{block_name:<14}{_pearson_corr(gap, grad):>13.4f}"
+                    f"{_pearson_corr(gap_rank, grad_rank):>13.4f}\n")
+            all_gap_ranks.append(gap_rank)
+            all_grad_ranks.append(grad_rank)
+        overall_spearman = _pearson_corr(torch.cat(all_gap_ranks), torch.cat(all_grad_ranks))
+        f.write(f"{'TOTAL':<14}{'-':>13}{overall_spearman:>13.4f}  (레이어 내 rank 병합 기준)\n\n")
+
+        # 3) 임계값별 불일치/일치 채널 집계
+        f.write("--- 불일치 채널 집계 (레이어 내 rank 백분위 기준) ---\n")
+        f.write("gapHI_gradLO: gap_rank >= 1-t AND grad_rank <= t (gap만 큼)\n")
+        f.write("gapLO_gradHI: gap_rank <= t AND grad_rank >= 1-t (grad만 큼)\n")
+        f.write("bothHI/bothLO: 둘 다 상위 / 둘 다 하위. t=0.5는 중앙값 분할 4분면(전수).\n\n")
+        for t in (0.5, 0.3, 0.2, 0.1):
+            f.write(f"[t = {t}]\n")
+            f.write(f"{'layer':<14}{'count':>7}{'gapHI_gradLO':>14}{'gapLO_gradHI':>14}"
+                    f"{'bothHI':>9}{'bothLO':>9}\n")
+            tot = {'n': 0, 'hl': 0, 'lh': 0, 'hh': 0, 'll': 0}
+            for block_name, _, _, _, _, gap_rank, grad_rank in per_layer:
+                hi_g, lo_g = gap_rank >= 1 - t, gap_rank <= t
+                hi_d, lo_d = grad_rank >= 1 - t, grad_rank <= t
+                hl = int((hi_g & lo_d).sum())
+                lh = int((lo_g & hi_d).sum())
+                hh = int((hi_g & hi_d).sum())
+                ll = int((lo_g & lo_d).sum())
+                n = gap_rank.numel()
+                f.write(f"{block_name:<14}{n:>7}{hl:>14}{lh:>14}{hh:>9}{ll:>9}\n")
+                tot['n'] += n; tot['hl'] += hl; tot['lh'] += lh; tot['hh'] += hh; tot['ll'] += ll
+            f.write(f"{'TOTAL':<14}{tot['n']:>7}{tot['hl']:>14}{tot['lh']:>14}"
+                    f"{tot['hh']:>9}{tot['ll']:>9}\n")
+            f.write(f"{'RATIO(%)':<14}{'':>7}{100 * tot['hl'] / tot['n']:>14.2f}"
+                    f"{100 * tot['lh'] / tot['n']:>14.2f}{100 * tot['hh'] / tot['n']:>9.2f}"
+                    f"{100 * tot['ll'] / tot['n']:>9.2f}\n\n")
+
+    print(f"[phi 구성요소 분석 저장] {csv_path}")
+    print(f"[phi 구성요소 분석 저장] {summary_path}")
+
+
 def _build_weight_mask_list(model, selected_by_layer, device):
     """impt_type=3: 가중치 단위 마스크 생성.
     selected_by_layer: {layer_name: 제거할 weight의 flat index LongTensor}
@@ -1895,6 +2024,7 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
 
     phi_by_layer = {}
     gap_by_layer = {}  # impt_type=3용: gradient를 곱하기 전의 raw activation gap (채널 단위, float64)
+    mean_grad_by_layer = {}  # φ 구성요소 분석용: gap과 곱하기 전의 배치 평균 |activation grad| (채널 단위, float64)
     print("phi 레이어별 요약:")
     for layer_name, layer in target_layers.items():
         num_channels = int(layer.weight.shape[0])
@@ -1910,6 +2040,8 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
             mean_gradient = mean_gradient / mean_grad_counts[layer_name]
         else:
             mean_gradient = zero_vec
+
+        mean_grad_by_layer[layer_name] = mean_gradient.clone()
 
         phi = torch.nan_to_num(activation_gap * mean_gradient, nan=0.0, posinf=0.0, neginf=0.0)
         phi_by_layer[layer_name] = phi.to(torch.float32)
@@ -1961,7 +2093,7 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
                 block_wgrad_by_layer[wname] = weight_grad_sums[wname] / weight_grad_counts[wname]
         print(f"block weight-grad 평균 완료: {len(block_wgrad_by_layer)}개 레이어")
 
-    return phi_by_layer, phi_weight_by_layer, gap_by_layer, block_wgrad_by_layer
+    return phi_by_layer, phi_weight_by_layer, gap_by_layer, block_wgrad_by_layer, mean_grad_by_layer
 
 
 def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_classes = 2, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)],col_names=['race','gender'], para_batch=1, impt_type = 0, stop_batch=10000, delta_p=False,n_jobs=1, network=None, sensitive_group=None):
@@ -2168,7 +2300,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 
         print(f"impt_type == 2: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={IMPT2_NORM}로 채널 단위 fairness-aware pruning 시작")
 
-        phi_by_layer, phi_weight_by_layer, _, _ = compute_phi_k(
+        phi_by_layer, phi_weight_by_layer, gap_by_layer, _, mean_grad_by_layer = compute_phi_k(
             model,
             test_csv,
             new_img_dir=new_img_dir,
@@ -2178,6 +2310,9 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             masked_grads=masked_grads,
             sensitive_group=sensitive_group,
         )
+
+        if getattr(config, 'glo_phi_analysis', False):
+            _save_phi_component_analysis(gap_by_layer, mean_grad_by_layer, phi_by_layer)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -2463,7 +2598,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 
         print(f"impt_type == 3: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={norm_mode}로 가중치 단위 fairness-aware pruning 시작")
 
-        _, _, gap_by_layer, block_wgrad_by_layer = compute_phi_k(
+        _, _, gap_by_layer, block_wgrad_by_layer, _ = compute_phi_k(
             model,
             test_csv,
             new_img_dir=new_img_dir,

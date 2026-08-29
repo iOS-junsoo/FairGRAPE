@@ -56,6 +56,7 @@ def experiment(args):
     config.glo_impt_type = args.impt  # save_models run_info.txt에 impt_type별 적용 알파를 기록하기 위함
     config.glo_dataset = dataset
     config.glo_seed = seed
+    config.glo_phi_analysis = args.phi_analysis  # φ 구성요소(gap/grad) 분리 분석 로그 저장 여부
 
     # 실험 시작 전에 결과 저장 폴더(retrain_epoch_results/임시 저장소/<dataset>_impt<impt>_seed<seed>_<시각>)를 미리 생성
     from train_and_val import _get_results_run_dir
@@ -858,6 +859,7 @@ if __name__ == "__main__":
     parser.add_argument('--race_binary', action='store_true', help='UTKFace 전용: race를 White(0) vs Non-White(1) 이진으로 병합 (Others 포함, csv/UTKFace_labels_full.csv + gender×race5 층화 분할 사용)')
     parser.add_argument('--skew_beta', type=float, default=0, help='UTKFace race_binary 전용: FSCL식 편향 주입 비율 β (>1). train을 White m:f=β:1 / Non-White 1:β로 재표집하고 val/test는 (race×gender) 4셀 균형으로 재구성. 0이면 비활성')
     parser.add_argument('--score_only', action='store_true', help='저장된 프루닝 체크포인트(--checkpoint)의 채널별 성능/공정성 기여도만 재계산해 channel_pruning_logs/score_only_*/에 저장하고 종료 (프루닝·재학습·모델 저장 없음)')
+    parser.add_argument('--phi_analysis', action='store_true', help='impt_type=2에서 φ의 두 인자(activation gap, mean|activation grad|)를 채널별로 분리해 phi_component_analysis/에 통계·불일치 분석 로그를 저장')
 
 
 

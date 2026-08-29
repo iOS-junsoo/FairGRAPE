@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 import pandas as pd
 import numpy as np
+# numpy 1.24+에서 제거된 np.bool 별칭을 imgaug(구버전)가 참조하므로 호환 심 추가
+if not hasattr(np, 'bool'):
+    np.bool = bool
 from torchvision import datasets, transforms
 import copy
 from PIL import Image
