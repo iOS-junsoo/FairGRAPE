@@ -29,25 +29,25 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.5
+IMPT_TYPE2_ALPHA = 0.3
 IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정성 혼합 가중치. 직접 수정하면 됨.
-# impt_type=3 정규화 방식. 'rank': 블록 내 활성 가중치의 순위 백분위(0~1) — perf/φ 분포 모양과
+# impt_type=3 정규화 방식. 'rank': 블록 s내 활성 가중치의 순위 백분위(0~1) — perf/φ 분포 모양과
 # 무관하게 같은 스케일이 되어 alpha가 실제 혼합 비율로 작동. 'max': 기존 블록 max 나눗셈
 # (perf가 제곱 heavy-tail이라 벌크가 0으로 붕괴 → alpha<1에서 φ 단독 지배 문제 있음).
 IMPT3_NORM = 'rank'
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 # IMPT2_KEEP_PER_ITER = 0.975  # → 명령어 인자 --keep_per_iter (config.glo_keep_per_iter)로 대체됨. 이 값을 바꿔도 반영 안 됨.
-IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.08  # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 8%는 유지 (직전 floor 8% 실험과 동일 조건)
+IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03 # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 8%는 유지 (직전 floor 8% 실험과 동일 조건)
 IMPT2_PROTECTION_RATIO  =0.005  # impt_type=2/3: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
 # impt_type=2: 한 iter에서 층별 제거 가중치 상한 배수. None이면 비활성(기존 동작과 완전 동일).
 # cap[bn] = 배수 × remove_target × (층 bn의 후보 가중치 합 / candidate_channel_weights)
 # 상한 도달 층의 채널은 전역 선택에서 스킵되고, 목표 미달 시 상한만 풀어(floor 유지) 2차 패스로 채운다.
-IMPT2_LAYER_CAP_MULTIPLIER = 2.0
+IMPT2_LAYER_CAP_MULTIPLIER = None
 # impt_type=2 정규화 방식. 'rank': 활성 채널의 순위 백분위(0~1) — perf가 제곱 heavy-tail이라
 # max 나눗셈은 벌크가 0으로 붕괴해 alpha가 실효 혼합비로 작동하지 못함(2026-08-21 진단:
 # max에서 α=0.7이어도 perf:φ 실효 기여 0.22:1, rank에서는 2.33:1로 설계대로 동작).
 # 'max': 기존 블록 max 나눗셈 — 과거 CelebA 실험 재현 시에만 사용.
-IMPT2_NORM = 'rank'
+IMPT2_NORM = 'max'
 
 
 forward_mapping_dict = {
@@ -1299,7 +1299,9 @@ def _get_pruning_log_run_dir(base_dir, cache_attr):
     impt = getattr(_config, 'glo_impt_type', None)
     seed = getattr(_config, 'glo_seed', None)
     stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
-    run_dir = os.path.join(base_dir, f"{ds}_impt{impt}_seed{seed}_{stamp}")
+    # gap-only 비교 실험 런은 폴더명에 태그를 붙여 일반 런과 구분
+    tag = '_gaponly' if getattr(_config, 'glo_phi_gap_only', False) else ''
+    run_dir = os.path.join(base_dir, f"{ds}_impt{impt}_seed{seed}{tag}_{stamp}")
     os.makedirs(run_dir, exist_ok=True)
     setattr(_config, cache_attr, run_dir)
     print(f"[pruning 로그 런 폴더 생성] {run_dir}")
@@ -2362,6 +2364,11 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 
         if getattr(config, 'glo_phi_analysis', False):
             _save_phi_component_analysis(gap_by_layer, mean_grad_by_layer, phi_by_layer)
+
+        # 비교 실험(--phi_gap_only): 공정성 기여도로 gradient를 곱하기 전의 activation gap만 사용
+        if getattr(config, 'glo_phi_gap_only', False):
+            print("impt_type == 2: --phi_gap_only 활성 — φ로 activation gap만 사용 (activation gradient 미적용)")
+            phi_by_layer = {name: gap.to(torch.float32) for name, gap in gap_by_layer.items()}
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

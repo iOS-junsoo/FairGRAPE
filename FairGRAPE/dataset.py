@@ -26,10 +26,10 @@ import json
 import warnings
 warnings.filterwarnings("ignore")
 
-# age 이진화 임계값: 구간 하한(lower bound) >= threshold → 1(older), 미만 → 0(younger).
-# UTKFace age는 문자열 구간(0-2/3-9/10-19/20-29/30-39/40-49/50-59/60-69/more than 70)이므로
-# 구간을 정확히 가르려면 {3, 10, 20, 30, 40, 50, 60, 70} 중에서 선택할 것. 실험자가 조정하는 값.
-AGE_BINARY_THRESHOLD = 30
+# age 이진화 임계값: 나이 >= threshold → 1(older), 미만 → 0(younger). 실험자가 조정하는 값.
+# 나이는 UTKFace 파일명([age]_[gender]_[race]_[date]...)의 첫 토큰(정확한 나이)에서 파싱하므로
+# 임의 정수 절단이 가능(예: 35 → 1~34 vs 35+). 파싱 실패 행만 csv 구간 문자열의 하한으로 폴백.
+AGE_BINARY_THRESHOLD = 35
 
 # 한 이미지 내의 모든 얼굴이 동일한 세트에 속하도록 train/validation/test 세트로 분할
 def split_image_name(val):
@@ -99,13 +99,20 @@ def relabel(frame, seven_races=True, drop_race=False, race_binary=False):
         frame.loc[frame['gender'] == 'Male', 'gender'] = 0
         frame.loc[frame['gender'] == 'Female', 'gender'] = 1
 
-    # UTKFace age(문자열 구간) → 이진 age_bin 라벨 (task=age 용)
-    # age는 '0-2', '30-39', 'more than 70' 같은 구간 문자열이므로 구간 하한을 파싱해 비교한다.
+    # UTKFace age → 이진 age_bin 라벨 (task=age 용)
+    # 정확한 나이는 파일명([age]_[gender]_[race]_[date]...) 첫 토큰에서 파싱한다 — csv의 age 컬럼은
+    # 구간 문자열('30-39' 등)이라 35 같은 구간 중간 절단이 불가능하기 때문. 파싱 실패 행만 구간 하한 폴백.
     # seven_races=False 경로(UTKFace/CelebA)로 게이트: FairFace(seven_races=True)는 제외되고
     # CelebA는 age 컬럼이 없어 결과적으로 UTKFace에만 생성된다.
     if not seven_races and 'age' in frame.columns:
         age_lower = frame['age'].astype(str).str.extract(r'(\d+)', expand=False).astype(float)
-        frame['age_bin'] = (age_lower >= AGE_BINARY_THRESHOLD).astype(int)
+        if 'image_name' in frame.columns:
+            exact_age = pd.to_numeric(
+                frame['image_name'].astype(str).str.split('_').str[0], errors='coerce')
+            age_val = exact_age.fillna(age_lower)
+        else:
+            age_val = age_lower
+        frame['age_bin'] = (age_val >= AGE_BINARY_THRESHOLD).astype(int)
 
     # White vs Non-White 이진 병합 (FSCL 'Caucasian or not' 정의, Others 포함).
     # 층화 분할·소그룹 분석용으로 병합 전 라벨을 race_orig에 보존한다.
@@ -168,26 +175,30 @@ def add_imbalance(frame):
 # White(race=0)는 male:female = beta:1, Non-White(race=1)는 1:beta.
 # gender 코딩은 relabel 기준 0=Male, 1=Female. 데이터 추가는 불가하므로 다수 쪽을 다운샘플한다.
 # race_binary 병합 후 프레임 전용 (race ∈ {0,1}).
-def apply_fscl_skew(train_frame, beta, seed=42):
+def apply_fscl_skew(train_frame, beta, seed=42, skew_col='gender'):
+    # skew_col: 인종과 상관을 주입할 축. 'gender'(태스크=race 구도, 기존 동작) 또는
+    # 'age_bin'(태스크=age 구도). White는 skew_col 0:1=β:1, Non-White는 1:β로 재표집.
     if beta <= 1:
         raise ValueError(f"skew 비율 beta는 1보다 커야 합니다. 현재: {beta}")
     if not set(train_frame['race'].unique()) <= {0, 1}:
         raise ValueError("apply_fscl_skew는 race ∈ {0,1} (race_binary) 프레임 전용입니다.")
+    if skew_col not in train_frame.columns or not set(train_frame[skew_col].unique()) <= {0, 1}:
+        raise ValueError(f"apply_fscl_skew의 skew_col('{skew_col}')은 0/1 이진 컬럼이어야 합니다.")
 
     rng = np.random.RandomState(seed)
     parts = []
     for r in sorted(train_frame['race'].unique()):
-        males = train_frame[(train_frame['race'] == r) & (train_frame['gender'] == 0)]
-        females = train_frame[(train_frame['race'] == r) & (train_frame['gender'] == 1)]
-        target = beta if r == 0 else 1.0 / beta  # 목표 male:female 비율
-        if len(males) > target * len(females):
-            n_m, n_f = int(round(target * len(females))), len(females)
+        grp0 = train_frame[(train_frame['race'] == r) & (train_frame[skew_col] == 0)]
+        grp1 = train_frame[(train_frame['race'] == r) & (train_frame[skew_col] == 1)]
+        target = beta if r == 0 else 1.0 / beta  # 목표 skew_col 0:1 비율
+        if len(grp0) > target * len(grp1):
+            n_0, n_1 = int(round(target * len(grp1))), len(grp1)
         else:
-            n_m, n_f = len(males), int(round(len(males) / target))
-        parts.append(males.iloc[rng.permutation(len(males))[:n_m]])
-        parts.append(females.iloc[rng.permutation(len(females))[:n_f]])
-        print(f"[skew β={beta}] race={r}: male {len(males)}→{n_m}, female {len(females)}→{n_f} "
-              f"(m:f = {n_m / max(n_f, 1):.2f})")
+            n_0, n_1 = len(grp0), int(round(len(grp0) / target))
+        parts.append(grp0.iloc[rng.permutation(len(grp0))[:n_0]])
+        parts.append(grp1.iloc[rng.permutation(len(grp1))[:n_1]])
+        print(f"[skew β={beta}] race={r}: {skew_col}=0 {len(grp0)}→{n_0}, {skew_col}=1 {len(grp1)}→{n_1} "
+              f"(0:1 = {n_0 / max(n_1, 1):.2f})")
 
     out = pd.concat(parts)
     out = out.iloc[rng.permutation(len(out))].reset_index(drop=True)
@@ -196,12 +207,12 @@ def apply_fscl_skew(train_frame, beta, seed=42):
 
 # 평가셋 균형화: (race × gender) 각 셀을 최소 셀 크기로 다운샘플해 완전 균형으로 만든다.
 # FSCL 프로토콜의 'val/test는 그룹×클래스 완전 균형' 재현용 (Phase 2 전용).
-def make_balanced_eval(frame, seed=42):
+def make_balanced_eval(frame, seed=42, cols=('race', 'gender')):
     rng = np.random.RandomState(seed)
-    cell_sizes = frame.groupby(['race', 'gender']).size()
+    cell_sizes = frame.groupby(list(cols)).size()
     n_min = int(cell_sizes.min())
     parts = []
-    for _, sub in frame.groupby(['race', 'gender']):
+    for _, sub in frame.groupby(list(cols)):
         parts.append(sub.iloc[rng.permutation(len(sub))[:n_min]])
     out = pd.concat(parts).reset_index(drop=True)
     print(f"[balanced eval] 셀 크기:\n{cell_sizes.to_string()}\n→ 셀당 {n_min}개, 총 {out.shape[0]}행")

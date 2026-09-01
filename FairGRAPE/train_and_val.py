@@ -26,10 +26,26 @@ def _get_model_run_dir():
         return run_dir
 
     run_started = datetime.datetime.now()
-    run_dir = os.path.join('save_models', run_started.strftime("%Y%m%d_%H%M%S"))
-    os.makedirs(run_dir, exist_ok=True)
-
     impt_type = getattr(config, 'glo_impt_type', None)
+
+    # 폴더명: <시각>_<데이터셋>_alpha<α>_<정규화>_impt<impt>_seed<seed>
+    # (impt_type에 알파/정규화 개념이 없으면 해당 부분은 생략된다)
+    name_parts = [run_started.strftime("%Y%m%d_%H%M%S"),
+                  str(getattr(config, 'glo_dataset', None) or 'unknown')]
+    try:
+        import prune as _p
+        if impt_type == 1:
+            name_parts.append(f"alpha{_p.IMPT_TYPE1_ALPHA}")
+        elif impt_type == 2:
+            name_parts += [f"alpha{_p.IMPT_TYPE2_ALPHA}", str(_p.IMPT2_NORM)]
+        elif impt_type == 3:
+            name_parts += [f"alpha{_p.IMPT_TYPE3_ALPHA}", str(_p.IMPT3_NORM)]
+    except Exception:  # noqa: BLE001 — 폴더명 구성 실패가 저장 자체를 막으면 안 됨
+        pass
+    name_parts.append(f"impt{impt_type}")
+    name_parts.append(f"seed{getattr(config, 'glo_seed', None)}")
+    run_dir = os.path.join('save_models', "_".join(name_parts))
+    os.makedirs(run_dir, exist_ok=True)
 
     # impt_type → prune.py의 적용 알파 설명 (import 실패해도 저장 자체는 막지 않는다)
     alpha_lines = []
@@ -55,7 +71,8 @@ def _get_model_run_dir():
     except Exception as e:  # noqa: BLE001
         alpha_lines.append(f"적용 알파: 확인 실패 ({e})")
 
-    info_path = os.path.join(run_dir, 'run_info.txt')
+    # '0_' 접두사: 탐색기 정렬에서 BEST_MODEL_*.pt들보다 항상 위에 오게 하기 위함
+    info_path = os.path.join(run_dir, '0_run_info.txt')
     with open(info_path, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
         f.write("모델 저장 런 정보 (save_models run info)\n")
@@ -68,7 +85,7 @@ def _get_model_run_dir():
             f.write(f"{line}\n")
         f.write(f"GRL 사용       : {getattr(config, 'glo_use_grl', None)}\n")
 
-    print(f"[모델 저장 폴더 생성] {run_dir} (run_info.txt 기록 완료)")
+    print(f"[모델 저장 폴더 생성] {run_dir} (0_run_info.txt 기록 완료)")
     config.glo_model_run_dir = run_dir
     return run_dir
 
@@ -91,8 +108,10 @@ def _get_results_run_dir():
     impt_type = getattr(config, 'glo_impt_type', None)
     seed = getattr(config, 'glo_seed', None)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # gap-only 비교 실험 런은 폴더명에 태그를 붙여 일반 런과 구분
+    tag = '_gaponly' if getattr(config, 'glo_phi_gap_only', False) else ''
     run_dir = os.path.join('retrain_epoch_results', '임시 저장소',
-                           f"{dataset}_impt{impt_type}_seed{seed}_{timestamp}")
+                           f"{dataset}_impt{impt_type}_seed{seed}{tag}_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
 
     print(f"[결과 저장 폴더 생성] {run_dir}")
@@ -645,21 +664,8 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     f.write(output_text)
                 print(f"[출력 저장] {file_path}")
 
-                #! 모델 저장 (save_models/<런 시작 시각>/ 하위에 저장)
-                model_save_dir = _get_model_run_dir()
-
-                model_filename = f"epoch_prune{config.glo_prune_iter + 1:02d}_retrain{epoch + 1:02d}_{timestamp}.pt"
-                model_path = os.path.join(model_save_dir, model_filename)
-
-                torch.save({
-                    'model_state_dict': training_model.state_dict(),  # GRL 사용 시 Wrapper 포함 (base_model.* 키)
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'epoch': epoch,
-                    'prune_iteration': config.glo_prune_iter + 1,
-                    'grl_enabled': use_debiasing,
-                }, model_path)
-
-                print(f"[모델 저장] {model_path}")
+                # 에폭별 체크포인트(epoch_prune*_retrain*.pt) 저장은 중단됨 —
+                # 모델은 재학습 종료 후 BEST_MODEL_prune_*.pt 하나만 저장한다 (아래 best 저장부 참고)
 
         if hook_handle is not None:
             hook_handle.remove()

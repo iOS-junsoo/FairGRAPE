@@ -1,0 +1,108 @@
+================================================================================
+Channel Pruning Log
+  dataset    : UTKFace
+  impt_type  : 2
+  seed       : 42
+  iteration  : 91
+  alpha      : 0.5000
+  norm       : rank
+  timestamp  : 2026-08-30 07:20:29
+  remove_target  : 4398
+  accum_removed  : 4621
+  selected_channels : 13
+  gamma             : 0.0050
+  cap_multiplier    : 2.0
+  cap_deferred(1차 상한 스킵) : 165
+  cap_relaxed_channels        : 2
+  cap_relaxed_removed         : 554
+  remove_target_met : yes
+  total_params   : 2192320
+  active_after   : 584309
+  model_sparsity : 73.3%
+================================================================================
+
+[ 레이어별 채널 제거 비율 ]
+  layer                total_ch  this_iter    cumul  cumul_%
+  ----------------------------------------------------------
+  features.1                 32          1       18    56.2%
+  features.2                 96          0       88    91.7%
+  features.3                144          0      132    91.7%
+  features.4                144          3      124    86.1%
+  features.5                192          0      176    91.7%
+  features.6                192          0      176    91.7%
+  features.7                192          0      176    91.7%
+  features.8                384          0      353    91.9%
+  features.9                384          0      353    91.9%
+  features.10               384          0      353    91.9%
+  features.11               384          0      353    91.9%
+  features.12               576          0      529    91.8%
+  features.13               576          0      529    91.8%
+  features.14               576          0      529    91.8%
+  features.15               960          0      883    92.0%
+  features.16               960          0      883    92.0%
+  features.17               960          9      828    86.2%
+
+[ 레이어별 보호 영역 (γ=0.0050) ]
+  layer                  active  protected  protect_%
+  --------------------------------------------------
+  features.1                 15          1       6.7%
+  features.2                  8          1      12.5%
+  features.3                 12          1       8.3%
+  features.4                 23          1       4.3%
+  features.5                 16          1       6.2%
+  features.6                 16          1       6.2%
+  features.7                 16          1       6.2%
+  features.8                 31          1       3.2%
+  features.9                 31          1       3.2%
+  features.10                31          1       3.2%
+  features.11                31          1       3.2%
+  features.12                47          1       2.1%
+  features.13                47          1       2.1%
+  features.14                47          1       2.1%
+  features.15                77          1       1.3%
+  features.16                77          1       1.3%
+  features.17               141          1       0.7%
+
+[ 층별 제거 상한 (cap_multiplier=2.0, 후보 가중치 비례 배분) ]
+  layer                cand_w      cap_w  removed_1차  relaxed_2차  skip_cap  skip_floor_1차  skip_floor_2차
+  ----------------------------------------------------------------------------------------------------
+  features.1              350         18          25           0        13              0              0
+  features.2              343         17           0           0         0              7              0
+  features.3              627         32           0           0         0             11              0
+  features.4             1430         73         130           1        20              0              0
+  features.5             1095         56           0           0         0             15              0
+  features.6             1095         56           0           0         0             15              0
+  features.7             1575         80           0           0         0             15              0
+  features.8             4110        209           0           0         0             30              0
+  features.9             4110        209           0           0         0             30              0
+  features.10            4110        209           0           0         0             30              0
+  features.11            5070        258           0           0         0             30              0
+  features.12            9246        470           0           0         0             46              0
+  features.13            9246        470           0           0         0             46              0
+  features.14           12190        620           0           0         0             46              0
+  features.15           25004       1271           0           0         0             76              0
+  features.16           25004       1271           0           0         0             76              0
+  features.17           68460       3479        3912           1       132              0              0
+
+[ 블록별 제거 채널 수 ]
+  features.1: 1채널 제거
+  features.17: 9채널 제거
+  features.4: 3채널 제거
+
+[ 선택된 채널 상세 ]
+  (phi/perf: raw, phi_n/perf_n: 정규화 후 값 — score = α·perf_n − (1−α)·phi_n)
+block                             ch        score          phi         perf    phi_n   perf_n  weights
+----------------------------------------------------------------------------------------------------
+features.4                       130    -0.159091 1.905567e-06 1.688816e-04   0.9091   0.5909       65
+features.17                      267    -0.153571 3.556989e-06 1.791935e-06   0.9357   0.6286      489
+features.17                      344    -0.150000 3.202767e-07 9.974990e-08   0.3571   0.0571      489
+features.17                      704    -0.146429 5.099297e-07 3.066469e-07   0.4786   0.1857      489
+features.17                      576    -0.146429 1.175138e-06 1.043439e-06   0.7286   0.4357      489
+features.1                         0    -0.142857 1.510777e-24 0.000000e+00   0.3571   0.0714       25
+features.17                       69    -0.139286 3.831150e-07 2.121048e-07   0.4071   0.1286      489
+features.4                        59    -0.136364 5.977491e-08 3.204400e-05   0.4091   0.1364       65
+features.17                       78    -0.135714 8.750478e-07 9.028778e-07   0.6643   0.3929      489
+features.17                      586    -0.135714 6.936742e-07 5.135974e-07   0.5786   0.3071      489
+features.17                      441    -0.132143 7.020435e-07 5.647557e-07   0.5857   0.3214      489
+features.4                       140    -0.136364 8.609974e-08 3.821731e-05   0.4545   0.1818       65 relaxed
+features.17                      936    -0.132143 3.134014e-07 1.358955e-07   0.3500   0.0857      489 relaxed

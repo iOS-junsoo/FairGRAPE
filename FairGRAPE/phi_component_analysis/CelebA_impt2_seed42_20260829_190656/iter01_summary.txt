@@ -1,0 +1,161 @@
+=== phi 구성요소 분석 (activation_gap vs mean|activation_grad|) ===
+dataset: CelebA
+seed: 42
+iteration: 1
+total_channels: 7136 (features.1~17, 프루닝 제외인 features.18 미포함)
+timestamp: 2026-08-29 19:06:56
+
+--- activation_gap (그래디언트 곱하기 전 raw 격차) 레이어별 통계 ---
+layer           count         mean          std          min          p25       median          p75          max
+features.1         32   4.2742e-03   7.9214e-03   0.0000e+00   9.4639e-05   9.1806e-04   3.7643e-03   3.6101e-02
+features.2         96   6.9686e-03   8.2420e-03   2.2603e-05   2.4053e-04   2.8662e-03   1.2802e-02   3.6366e-02
+features.3        144   1.3673e-03   1.8006e-03   8.7001e-06   2.5808e-04   7.4559e-04   1.7197e-03   9.7843e-03
+features.4        144   7.5730e-03   9.1207e-03   9.6629e-05   2.0530e-03   4.9804e-03   1.0042e-02   5.9916e-02
+features.5        192   1.7680e-03   2.3904e-03   5.6310e-05   3.3770e-04   8.4152e-04   2.0772e-03   1.5951e-02
+features.6        192   1.3462e-03   1.8850e-03   1.8238e-10   2.9160e-04   7.3898e-04   1.6473e-03   1.5565e-02
+features.7        192   8.4489e-03   7.0449e-03   8.7573e-05   3.1684e-03   6.6124e-03   1.1859e-02   4.2121e-02
+features.8        384   1.5629e-03   1.8899e-03   6.3913e-05   4.1663e-04   8.8377e-04   1.9834e-03   1.6335e-02
+features.9        384   1.8265e-03   2.1134e-03   0.0000e+00   4.4918e-04   1.0503e-03   2.4617e-03   1.3599e-02
+features.10       384   1.5037e-03   1.5425e-03   0.0000e+00   4.5322e-04   9.6593e-04   1.9304e-03   9.1426e-03
+features.11       384   3.1184e-03   2.5036e-03   9.0580e-05   1.3028e-03   2.3715e-03   4.4583e-03   1.7228e-02
+features.12       576   1.7756e-03   2.1115e-03   0.0000e+00   3.8972e-04   1.0140e-03   2.4364e-03   1.8641e-02
+features.13       576   1.8290e-03   2.2209e-03   0.0000e+00   4.0023e-04   9.7508e-04   2.5581e-03   2.0518e-02
+features.14       576   4.4609e-03   3.7665e-03   0.0000e+00   1.8886e-03   3.2938e-03   6.1744e-03   2.0999e-02
+features.15       960   3.3167e-03   3.8901e-03   3.0461e-05   8.1355e-04   1.9294e-03   4.2819e-03   3.3714e-02
+features.16       960   4.4960e-03   5.0257e-03   0.0000e+00   1.1250e-03   2.6236e-03   6.0234e-03   3.3850e-02
+features.17       960   2.5778e-03   3.8746e-03   0.0000e+00   5.1929e-04   1.2161e-03   2.7727e-03   3.2622e-02
+
+--- mean|activation_grad| (배치 평균 절대 그래디언트) 레이어별 통계 ---
+layer           count         mean          std          min          p25       median          p75          max
+features.1         32   3.4416e-06   3.2819e-06   0.0000e+00   7.5913e-07   2.4715e-06   5.2009e-06   1.2183e-05
+features.2         96   4.7031e-06   3.5906e-06   1.0387e-07   3.1822e-06   4.0280e-06   5.2221e-06   3.4390e-05
+features.3        144   3.4023e-06   1.7131e-06   8.6563e-07   2.3164e-06   3.1160e-06   3.9513e-06   1.2254e-05
+features.4        144   8.5992e-06   9.3489e-06   2.7814e-06   6.2917e-06   7.3424e-06   9.0441e-06   1.1562e-04
+features.5        192   7.1970e-06   3.8789e-06   1.0248e-06   4.8718e-06   6.2176e-06   8.7303e-06   2.4868e-05
+features.6        192   6.2057e-06   2.9807e-06   0.0000e+00   4.0752e-06   5.8415e-06   7.6180e-06   1.9579e-05
+features.7        192   2.0598e-05   6.5567e-06   8.3821e-06   1.6608e-05   1.9524e-05   2.3018e-05   4.5336e-05
+features.8        384   1.4816e-05   6.9143e-06   1.5106e-06   1.0313e-05   1.2965e-05   1.7495e-05   5.0298e-05
+features.9        384   1.5435e-05   6.6975e-06   0.0000e+00   1.0965e-05   1.4050e-05   1.9091e-05   3.8695e-05
+features.10       384   1.3906e-05   6.3525e-06   0.0000e+00   9.1014e-06   1.3673e-05   1.7924e-05   3.4790e-05
+features.11       384   1.6390e-05   6.3157e-06   2.0745e-06   1.1818e-05   1.6029e-05   2.0370e-05   4.3115e-05
+features.12       576   1.4597e-05   7.3967e-06   0.0000e+00   9.9536e-06   1.2965e-05   1.8342e-05   5.6073e-05
+features.13       576   1.3357e-05   6.8465e-06   0.0000e+00   8.5847e-06   1.2296e-05   1.7329e-05   5.9491e-05
+features.14       576   4.5762e-05   1.9355e-05   0.0000e+00   3.4350e-05   4.4752e-05   5.6440e-05   1.6321e-04
+features.15       960   2.6716e-05   1.5151e-05   3.9411e-07   1.7196e-05   2.3271e-05   3.3275e-05   1.6095e-04
+features.16       960   2.4858e-05   1.7813e-05   0.0000e+00   1.4269e-05   2.1205e-05   3.1743e-05   2.5194e-04
+features.17       960   1.3749e-04   9.1223e-05   0.0000e+00   7.0753e-05   1.1408e-04   2.1766e-04   4.4290e-04
+
+--- activation_gap vs mean|activation_grad| 상관 ---
+layer           pearson_raw     spearman
+features.1          -0.1215       0.3387
+features.2          -0.2692      -0.5843
+features.3          -0.0903      -0.1639
+features.4          -0.0736      -0.0827
+features.5          -0.1075      -0.1236
+features.6          -0.0938      -0.0868
+features.7          -0.1638      -0.2337
+features.8          -0.0769      -0.0488
+features.9          -0.0040       0.0130
+features.10         -0.1354      -0.1655
+features.11         -0.1257      -0.0911
+features.12         -0.0236       0.0272
+features.13         -0.1467      -0.1216
+features.14         -0.1756      -0.1925
+features.15          0.0435       0.1161
+features.16         -0.0775       0.0276
+features.17         -0.5096      -0.6958
+TOTAL                     -      -0.1363  (레이어 내 rank 병합 기준)
+
+--- 불일치 채널 집계 (레이어 내 rank 백분위 기준) ---
+gapHI_gradLO: gap_rank >= 1-t AND grad_rank <= t (gap만 큼)
+gapLO_gradHI: gap_rank <= t AND grad_rank >= 1-t (grad만 큼)
+bothHI/bothLO: 둘 다 상위 / 둘 다 하위. t=0.5는 중앙값 분할 4분면(전수).
+
+[t = 0.5]
+layer           count  gapHI_gradLO  gapLO_gradHI   bothHI   bothLO
+features.1         32             8             8        8        8
+features.2         96            36            36       12       12
+features.3        144            42            42       30       30
+features.4        144            39            39       33       33
+features.5        192            51            51       45       45
+features.6        192            54            54       42       42
+features.7        192            56            56       40       40
+features.8        384            92            92      100      100
+features.9        384            95            95       97       97
+features.10       384           101           101       91       91
+features.11       384            98            98       94       94
+features.12       576           140           140      148      148
+features.13       576           155           155      133      133
+features.14       576           168           168      120      120
+features.15       960           217           217      263      263
+features.16       960           227           227      253      253
+features.17       960           359           359      121      121
+TOTAL            7136          1938          1938     1630     1630
+RATIO(%)                      27.16         27.16    22.84    22.84
+
+[t = 0.3]
+layer           count  gapHI_gradLO  gapLO_gradHI   bothHI   bothLO
+features.1         32             1             1        3        8
+features.2         96            19            18        4        0
+features.3        144            15            16       14       10
+features.4        144            14            14       10       13
+features.5        192            25            16       20       10
+features.6        192            22            13       21       15
+features.7        192            22            23       14       11
+features.8        384            34            35       36       31
+features.9        384            33            33       35       36
+features.10       384            45            44       22       26
+features.11       384            38            34       34       30
+features.12       576            51            48       62       52
+features.13       576            75            56       49       36
+features.14       576            63            69       30       43
+features.15       960            75            65      108       99
+features.16       960            82            86       74      102
+features.17       960           207           171        4       10
+TOTAL            7136           821           742      540      532
+RATIO(%)                      11.51         10.40     7.57     7.46
+
+[t = 0.2]
+layer           count  gapHI_gradLO  gapLO_gradHI   bothHI   bothLO
+features.1         32             0             0        0        7
+features.2         96             9             9        3        0
+features.3        144             6             8        7        0
+features.4        144             5            10        3        6
+features.5        192            14            10        5        2
+features.6        192            12             8        7        5
+features.7        192            15            12        7        3
+features.8        384            21            16       16        6
+features.9        384            12            13       14       18
+features.10       384            25            21       10       14
+features.11       384            20            19       12       12
+features.12       576            23            20       24       27
+features.13       576            39            25       22       21
+features.14       576            30            45        8       24
+features.15       960            29            30       42       46
+features.16       960            26            44       24       42
+features.17       960           137            85        0        2
+TOTAL            7136           423           375      204      235
+RATIO(%)                       5.93          5.26     2.86     3.29
+
+[t = 0.1]
+layer           count  gapHI_gradLO  gapLO_gradHI   bothHI   bothLO
+features.1         32             0             0        0        1
+features.2         96             2             3        0        0
+features.3        144             3             3        1        0
+features.4        144             0             5        1        0
+features.5        192             7             2        1        0
+features.6        192             4             2        2        2
+features.7        192             5             4        2        2
+features.8        384             9             4        1        3
+features.9        384             4             3        4        5
+features.10       384             8             8        3        7
+features.11       384             9             6        2        2
+features.12       576             9             7        1       15
+features.13       576            13             5        6       10
+features.14       576             7            14        3       13
+features.15       960             3            16        9       10
+features.16       960             1            10        0       12
+features.17       960            55            25        0        2
+TOTAL            7136           139           117       36       84
+RATIO(%)                       1.95          1.64     0.50     1.18
+

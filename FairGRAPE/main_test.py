@@ -57,6 +57,7 @@ def experiment(args):
     config.glo_dataset = dataset
     config.glo_seed = seed
     config.glo_phi_analysis = args.phi_analysis  # φ 구성요소(gap/grad) 분리 분석 로그 저장 여부
+    config.glo_phi_gap_only = args.phi_gap_only  # 비교 실험: 공정성 기여도로 activation gap만 사용 (gradient 미적용)
 
     # 실험 시작 전에 결과 저장 폴더(retrain_epoch_results/임시 저장소/<dataset>_impt<impt>_seed<seed>_<시각>)를 미리 생성
     from train_and_val import _get_results_run_dir
@@ -180,13 +181,15 @@ def experiment(args):
         print('이미지 가독성 검사를 건너뜁니다 (--skip_readable_check).')
 
     # Phase 2 (FSCL식 편향 주입): 가독성 필터링 이후에 적용해 최종 데이터 기준으로 셀 비율을 맞춘다.
-    # train은 White m:f=β:1 / Non-White 1:β 재표집, val/test는 (race×gender) 4셀 완전 균형.
+    # 인종과 상관을 주입할 축은 태스크에 따라 결정: 태스크=race면 gender, 태스크=age면 age_bin.
+    # train은 White 0:1=β:1 / Non-White 1:β 재표집, val/test는 (race×해당 축) 4셀 완전 균형.
     if skew_beta:
         if dataset != 'UTKFace' or not race_binary:
             raise ValueError("--skew_beta는 UTKFace + --race_binary 조합에서만 사용할 수 있습니다.")
-        frames['train'] = apply_fscl_skew(frames['train'], skew_beta)
-        frames['val'] = make_balanced_eval(frames['val'])
-        frames['test'] = make_balanced_eval(frames['test'])
+        skew_col = 'age_bin' if loss_type == 'age' else 'gender'
+        frames['train'] = apply_fscl_skew(frames['train'], skew_beta, skew_col=skew_col)
+        frames['val'] = make_balanced_eval(frames['val'], cols=('race', skew_col))
+        frames['test'] = make_balanced_eval(frames['test'], cols=('race', skew_col))
 
     # 민감그룹 수를 전역(config)으로 전달 (gender=2, UTKFace race=4, drop_race 3 4 → 2)
     # len(set) 대신 max+1: drop_race로 중간 번호가 비어도(예: {0,1,3}) 그룹 id 범위가 어긋나지 않게.
@@ -860,6 +863,7 @@ if __name__ == "__main__":
     parser.add_argument('--skew_beta', type=float, default=0, help='UTKFace race_binary 전용: FSCL식 편향 주입 비율 β (>1). train을 White m:f=β:1 / Non-White 1:β로 재표집하고 val/test는 (race×gender) 4셀 균형으로 재구성. 0이면 비활성')
     parser.add_argument('--score_only', action='store_true', help='저장된 프루닝 체크포인트(--checkpoint)의 채널별 성능/공정성 기여도만 재계산해 channel_pruning_logs/score_only_*/에 저장하고 종료 (프루닝·재학습·모델 저장 없음)')
     parser.add_argument('--phi_analysis', action='store_true', help='impt_type=2에서 φ의 두 인자(activation gap, mean|activation grad|)를 채널별로 분리해 phi_component_analysis/에 통계·불일치 분석 로그를 저장')
+    parser.add_argument('--phi_gap_only', action='store_true', help='비교 실험용: impt_type=2에서 공정성 기여도 φ로 activation gap만 사용 (activation gradient를 곱하지 않음). 로그 폴더에 gaponly 태그가 붙음')
 
 
 
