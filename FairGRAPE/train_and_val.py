@@ -45,6 +45,9 @@ def _get_model_run_dir():
             name_parts += ['alpha1.0', 'raw']
         elif impt_type == 3:
             name_parts += [f"alpha{_p.IMPT_TYPE3_ALPHA}", str(_p.IMPT3_NORM)]
+        elif impt_type == 4:
+            # 원본 FairGRAPE greedy 재현: 알파 없음 → 모드(clean/faithful)와 범위(blocks/all)로 구분
+            name_parts += [f"fg{_p.FG_ORIG_MODE}", str(getattr(config, 'glo_fg_scope', 'blocks'))]
     except Exception:  # noqa: BLE001 — 폴더명 구성 실패가 저장 자체를 막으면 안 됨
         pass
     name_parts.append(f"impt{impt_type}")
@@ -86,6 +89,12 @@ def _get_model_run_dir():
             alpha_lines.append(f"keep_per_iter(iter당 유지율): {getattr(config, 'glo_keep_per_iter', None)}")
             alpha_lines.append(f"보호 비율 IMPT2_PROTECTION_RATIO(γ) = {_prune.IMPT2_PROTECTION_RATIO}")
             alpha_lines.append(f"레이어 최소 유지 IMPT2_MIN_KEEP_RATIO_PER_LAYER = {_prune.IMPT2_MIN_KEEP_RATIO_PER_LAYER}")
+        elif impt_type == 4:
+            alpha_lines.append("적용 알파: 없음 (impt_type=4: 원본 FairGRAPE 그룹별 greedy, Bernardo1998/FairGRAPE prune.py b677eb9 재현)")
+            alpha_lines.append(f"FG_ORIG_MODE = '{_prune.FG_ORIG_MODE}' (clean: 원본 버그 Q1/Q2/Q3 수정, faithful: 원본 그대로)")
+            alpha_lines.append(f"fg_scope = '{getattr(config, 'glo_fg_scope', 'blocks')}' (blocks: features.1~17 conv, all: 모든 Conv2d+Linear)")
+            alpha_lines.append(f"para_batch = {getattr(config, 'glo_fg_para_batch', None)}, delta_p = {getattr(config, 'glo_fg_delta_p', None)}")
+            alpha_lines.append("레이어별 유지율 = 1 − prune_ratio(누적) (keep_per_iter 직접 미사용)")
         else:
             alpha_lines.append(f"적용 알파: 없음 (impt_type={impt_type}: prune.py 알파 미사용 경로)")
     except Exception as e:  # noqa: BLE001
@@ -133,6 +142,12 @@ def _get_results_run_dir():
     tag = '_gaponly' if getattr(config, 'glo_phi_gap_only', False) else ''
     if getattr(config, 'glo_perf_only', False):
         tag += '_perfonly'  # perf-only baseline 런(--perf_only) 구분
+    if impt_type == 4:
+        try:
+            import prune as _p
+            tag += f"_{_p.FG_ORIG_MODE}_{getattr(config, 'glo_fg_scope', 'blocks')}"  # 원본 FairGRAPE 재현 런: 모드·범위 구분
+        except Exception:  # noqa: BLE001
+            pass
     run_dir = os.path.join('retrain_epoch_results', '임시 저장소',
                            f"{dataset}_impt{impt_type}_seed{seed}{tag}_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)

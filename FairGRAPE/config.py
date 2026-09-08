@@ -29,3 +29,7 @@ glo_channel_log_run_dir = None # channel_pruning_logs/<dataset>_impt<impt>_seed<
 glo_weight_log_run_dir = None # weight_pruning_logs/ 아래 동일 규칙 런 폴더 (impt_type=3). prune._save_weight_pruning_log가 첫 저장 시 생성.
 glo_perf_only = False # --perf_only: impt_type=2/3에서 φ를 쓰지 않고 성능 기여도 원시값만으로 전역 프루닝 (alpha=1, γ=0, floor=0, cap=None, 정규화 없음). main_test.experiment()에서 설정.
 glo_collapse_notes = [] # prune.py가 어떤 층/블록의 활성 채널·가중치가 0이 된 iter를 기록 ("iter N: BLOCK COLLAPSE features.K"). BEST_MODEL_SUMMARY에 그대로 적힌다.
+glo_fg_scope = 'blocks' # --fg_scope: impt_type=4(원본 FairGRAPE greedy) 프루닝 대상 범위. 'blocks'=features.1~17 conv만, 'all'=모든 Conv2d+Linear. main_test.experiment()에서 설정.
+glo_fg_log_run_dir = None # fg_orig_pruning_logs/ 아래 런 폴더 (impt_type=4). prune._save_fg_orig_pruning_log가 첫 저장 시 생성.
+glo_fg_para_batch = None # --para_batch (impt_type=4 run_info 기록용)
+glo_fg_delta_p = None # --delta_p (impt_type=4 run_info 기록용)

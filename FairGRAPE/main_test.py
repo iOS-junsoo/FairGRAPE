@@ -59,6 +59,9 @@ def experiment(args):
     config.glo_phi_analysis = args.phi_analysis  # φ 구성요소(gap/grad) 분리 분석 로그 저장 여부
     config.glo_phi_gap_only = args.phi_gap_only  # 비교 실험: 공정성 기여도로 activation gap만 사용 (gradient 미적용)
     config.glo_perf_only = args.perf_only  # baseline 실험: φ 미사용, 성능 기여도 원시값만으로 전역 프루닝 (impt_type=2/3)
+    config.glo_fg_scope = args.fg_scope  # baseline 실험 03/04: impt_type=4(원본 FairGRAPE greedy) 프루닝 대상 범위 ('blocks' | 'all')
+    config.glo_fg_para_batch = args.para_batch  # impt_type=4 run_info 기록용
+    config.glo_fg_delta_p = args.delta_p  # impt_type=4 run_info 기록용
     if args.perf_only:
         if args.impt not in (2, 3):
             raise ValueError(f"--perf_only는 --impt 2 또는 3에서만 사용할 수 있습니다. 현재: --impt {args.impt}")
@@ -872,6 +875,8 @@ if __name__ == "__main__":
     parser.add_argument('--phi_gap_only', action='store_true', help='비교 실험용: impt_type=2에서 공정성 기여도 φ로 activation gap만 사용 (activation gradient를 곱하지 않음). 로그 폴더에 gaponly 태그가 붙음')
     parser.add_argument('--perf_only', action='store_true',
         help='impt_type=2/3: 공정성 기여도 φ를 쓰지 않고 성능 기여도 원시값만으로 전역 프루닝. 정규화 생략, alpha=1.0, gamma=0, floor=0, cap=None을 강제하고 φ 계산을 건너뜀 (baseline 실험 01/02용). 로그 폴더에 perfonly 태그가 붙음')
+    parser.add_argument('--fg_scope', type=str, default='blocks', choices=['blocks', 'all'],
+        help='impt_type=4(원본 FairGRAPE greedy): 프루닝 대상 범위. blocks=features.1~17 conv만(50개 Conv2d), all=모든 Conv2d+Linear(53개). 그 외 impt_type에서는 무시됨 (baseline 실험 03/04용)')
 
 
 

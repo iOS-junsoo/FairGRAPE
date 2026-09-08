@@ -11,6 +11,7 @@ import types
 import pandas as pd
 from collections import defaultdict
 import os
+import time
 import torch.optim as optim
 from joblib import Parallel, delayed
 import torchvision.models as models
@@ -48,6 +49,12 @@ IMPT2_LAYER_CAP_MULTIPLIER = None
 # max에서 α=0.7이어도 perf:φ 실효 기여 0.22:1, rank에서는 2.33:1로 설계대로 동작).
 # 'max': 기존 블록 max 나눗셈 — 과거 CelebA 실험 재현 시에만 사용.
 IMPT2_NORM = 'max'
+# impt_type=4 (원본 FairGRAPE greedy 재현, baseline 실험 03/04) 동작 모드.
+#   'clean'   : 원본 코드의 버그 3개(Q1 zero_grad 없음, Q2 점수 계산 중 optimizer.step, Q3 마지막 그룹만 /batches)를 고친 본 실험 모드
+#   'faithful': 원본 Bernardo1998/FairGRAPE prune.py(b677eb9) 와 동일 동작. 대조 실험(tests/compare_fg_orig.py)용.
+FG_ORIG_MODE = 'clean'
+FG_ORIG_BLOCK_LAYERS = None  # 런타임에 _get_fg_scope_layers() 가 채움 (마지막으로 사용한 범위 레이어 이름 리스트)
+FG_ORIG_LAST_STATS = None    # 런타임에 fg_orig_greedy_masks() 결과(레이어별 stats)를 남김. tests/compare_fg_orig.py 가 target_prop 비교에 사용
 
 
 forward_mapping_dict = {
@@ -526,6 +533,8 @@ class FairGRAPE(Prunner):
             print("alpha:", IMPT_TYPE2_ALPHA, "| gamma:", IMPT2_PROTECTION_RATIO)
         elif impt_type == 3:
             print("alpha:", IMPT_TYPE3_ALPHA, "| gamma:", IMPT2_PROTECTION_RATIO)
+        elif impt_type == 4:
+            print("FG_ORIG_MODE:", FG_ORIG_MODE, "| para_batch:", para_batch, "| delta_p:", delta_p)
         else:
             print("alpha:", IMPT_TYPE1_ALPHA)
 
@@ -1304,6 +1313,9 @@ def _get_pruning_log_run_dir(base_dir, cache_attr):
     # perf-only baseline 런(--perf_only)도 폴더명 태그로 구분
     if getattr(_config, 'glo_perf_only', False):
         tag += '_perfonly'
+    # impt_type=4(원본 FairGRAPE greedy) 런은 모드(clean/faithful)와 범위(blocks/all)를 폴더명에 기록
+    if impt == 4:
+        tag += f"_{FG_ORIG_MODE}_{getattr(_config, 'glo_fg_scope', 'blocks')}"
     run_dir = os.path.join(base_dir, f"{ds}_impt{impt}_seed{seed}{tag}_{stamp}")
     os.makedirs(run_dir, exist_ok=True)
     setattr(_config, cache_attr, run_dir)
@@ -2755,6 +2767,46 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         final_mask_list = [mask_by_name[name].to(device) for name in layer_order if name in mask_by_name]
         return final_mask_list
 
+    if impt_type == 4:
+        # ── impt_type == 4: 원본 FairGRAPE(Bernardo1998) 가중치 단위 greedy 재현 (baseline 실험 03/04) ──
+        #   점수: 그룹 g 표본만의 손실로 (|W|·|∂L_g/∂W|)² 를 배치 누적 → 레이어별 그룹 점유율 target
+        #   선택: 레이어마다 "선택된 가중치의 그룹별 점유율이 target 과 같아지도록" 가장 부족한 그룹의 상위 가중치부터
+        #         int(numel × (1 − prune_ratio)) 개 유지 (prune_ratio = 누적 비율; keep_per_iter 를 직접 쓰지 않음)
+        import config
+        mode = str(FG_ORIG_MODE)
+        scope = str(getattr(config, 'glo_fg_scope', 'blocks'))
+        delta_p_int = int(delta_p)
+        if delta_p_int not in (0, 1, 2):
+            raise ValueError(f"impt_type == 4 의 delta_p 는 0/1/2 만 허용됩니다 (원본 기본값 0). 현재: {delta_p}")
+        if delta_p_int != 0:
+            print(f"경고: impt_type == 4 원본 기본값은 delta_p=0 입니다. 현재 delta_p={delta_p_int} (원본 옵션 {delta_p_int} 경로로 진행)")
+        if float(delta_p) != float(delta_p_int):
+            print(f"경고: --delta_p {delta_p} 를 int({delta_p_int}) 로 해석했습니다 (Activate_diff 기본값 0.5 ≠ 원본 0)")
+        config.glo_imp_rate = float('nan')  # α 개념 없음 → run_info 에는 FG_ORIG_MODE 로 기록
+        print(f"impt_type == 4: 원본 FairGRAPE greedy → mode={mode}, scope={scope}, prune_ratio={prune_ratio:.4f}, "
+              f"para_batch={para_batch}, delta_p={delta_p_int}, stop_batch={stop_batch}")
+
+        t0 = time.perf_counter()
+        H = fg_orig_importance_by_group(model, test_csv, new_img_dir, output_cols_each_task, col_names, stop_batch, mode,
+                                        masked_grads=masked_grads)
+        t1 = time.perf_counter()
+        scope_layers = _get_fg_scope_layers(model, scope)
+        global FG_ORIG_BLOCK_LAYERS
+        FG_ORIG_BLOCK_LAYERS = list(scope_layers)
+        masks, stats = fg_orig_greedy_masks(model, H, prune_ratio, scope_layers, para_batch, delta_p_int)
+        t2 = time.perf_counter()
+        global FG_ORIG_LAST_STATS
+        FG_ORIG_LAST_STATS = stats
+        n_scope = sum(1 for st in stats if st['in_scope'])
+        kept_scope = sum(st['kept'] for st in stats if st['in_scope'])
+        numel_scope = sum(st['numel'] for st in stats if st['in_scope'])
+        print(f"impt_type == 4 greedy 완료: 범위 {n_scope} 레이어, 유지 {kept_scope}/{numel_scope} "
+              f"({kept_scope / max(numel_scope, 1):.4f}), 점수 {t1 - t0:.1f}s, greedy {t2 - t1:.1f}s")
+        _save_fg_orig_pruning_log(stats, prune_ratio, config.glo_prune_iter, mode, scope,
+                                  t_score=t1 - t0, t_greedy=t2 - t1, model=model,
+                                  para_batch=para_batch, delta_p=delta_p_int)
+        return masks
+
     if impt_type == 3:
         # ── impt_type == 3: 가중치 단위 fairness-aware pruning ──
         # impt_type == 2와 신호(activation gap, importance)·제거량(keep_per_iter)·
@@ -3131,6 +3183,304 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
     raise ValueError(f"지원하지 않는 impt_type 입니다: {impt_type}")
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# impt_type == 4: 원본 FairGRAPE (Bernardo1998/FairGRAPE prune.py @ b677eb9) 가중치 단위 greedy 프루닝
+#   - 점수: fg_orig_importance_by_group  ← 원본 importance_by_class0 (L584-678)
+#   - 선택: fg_orig_greedy_masks         ← 원본 fairness_grad 의 greedy 부분 (L481-580) + make_mask_by_grad (L761-769)
+#   - FG_ORIG_MODE='clean'  : 원본 코드의 버그 3개(Q1 zero_grad 부재, Q2 점수 계산 중 optimizer.step,
+#                             Q3 마지막 그룹만 batches로 나눔)를 고친 본 실험 모드
+#   - FG_ORIG_MODE='faithful': 원본 코드와 비트 수준으로 같은 동작(Q1·Q2·Q3 포함). 대조용.
+#   설계 문서: docs/.../03_fairgrape_orig_blocks.md §3, §4
+# ═══════════════════════════════════════════════════════════════════════════════
+def fg_orig_importance_by_group(model, test_csv, new_img_dir=None, output_cols_each_task=[(0, 2)],
+                                col_names=['age_bin', 'race'], stop_batch=10000, mode='clean',
+                                masked_grads=True, lr=1e-4):
+    """원본 importance_by_class0 를 옮긴 것. 반환: H_each_group = {group_idx: {layer_name: (|W|·|∂L_g/∂W|)² (cpu, weight shape)}}.
+
+    mode='faithful' 이면 원본과 동일하게 동작(Q1·Q2·Q3 포함), mode='clean' 이면 세 버그를 고친 경로.
+    원본에서 끄는 줄은 지우지 않고 주석으로 남겨 두었다 (원본 대비 무엇을 껐는지 코드만 보고 알 수 있게)."""
+    if mode not in ('clean', 'faithful'):
+        raise ValueError(f"FG_ORIG_MODE 는 'clean' 또는 'faithful' 이어야 합니다. 현재: {mode}")
+    faithful = (mode == 'faithful')
+    print(f"-------------fg_orig_importance_by_group (mode={mode})-------------")
+
+    if faithful:
+        model.train()                                             # 원본 L590
+        optimizer = optim.Adam(model.parameters(), lr=lr)         # 원본 L591-592 (마스크 nn.Parameter도 포함됨 → Q2)
+    else:
+        model.eval()                                              # Q2 수정: 점수는 현재 모델 고정 상태에서 (BN 통계·가중치 불변)
+        optimizer = None
+
+    test_frame = pd.read_csv(test_csv) if isinstance(test_csv, str) else test_csv.copy()
+    criterion = nn.CrossEntropyLoss()
+
+    # 이미지 경로 재매핑 (원본 L599-612 / Activate_diff compute_importance 와 동일)
+    if new_img_dir:
+        faces = set(os.listdir(new_img_dir))
+        new_face_name = []
+        face_found_mask = []
+        for i in range(test_frame.shape[0]):
+            face_name_align = split_image_name(test_frame['face_name_align'][i])
+            face_found_mask.append(face_name_align in faces)
+            if face_name_align in faces:
+                new_face_name.append(os.path.join(new_img_dir, face_name_align))
+        test_frame = test_frame[face_found_mask].reset_index(drop=True)
+        test_frame['face_name_align'] = new_face_name
+    test_loader, _ = make_datasets(test_frame, test_frame, True, 64, col_used=col_names)
+
+    # model.train()                                                # 원본 L615 (L590과 중복) → 위 분기에서 처리
+    sensitive_cols_in_target = len(output_cols_each_task)        # 라벨의 마지막 열 = 민감속성
+    sensitive_groups = sorted(set(test_frame[col_names[-1]]))
+    n_batches_total = min(len(test_loader), stop_batch)
+    print(f"민감그룹 {sensitive_groups}, 배치 {n_batches_total}/{len(test_loader)} (batch_size=64)")
+
+    grad_each_group = {}
+    H_each_group = {}
+    mask_at_each_layer = {}
+    batches = 0
+    group_idx = 0
+    t0 = time.perf_counter()
+    for batch_idx, sample_batched in enumerate(test_loader):
+        if batch_idx >= stop_batch:
+            break
+        batches += 1
+        if batch_idx % 50 == 0:
+            print(f"  {batch_idx}/{n_batches_total} 번째 mini-batch 그룹별 중요도 계산 중 ({time.perf_counter() - t0:.0f}s)")
+        image_batched, label_batched = sample_batched
+        image_batched = image_batched.to(device, dtype=torch.float)
+        label_batched = label_batched.to(device)
+        for group_idx, group in enumerate(sensitive_groups):
+            gradients = {}
+            hessians = {}
+            if not faithful:
+                model.zero_grad(set_to_none=True)                 # Q1 수정: 그룹마다 기울기 초기화 (원본에는 zero_grad 가 없음)
+            # 이 그룹 표본만의 비보호(태스크) 손실
+            obs_this_group = torch.squeeze((label_batched[:, sensitive_cols_in_target] == group).nonzero())
+            with torch.backends.cudnn.flags(enabled=False):       # 마스크 커스텀 forward 안정성 (Activate_diff 패턴)
+                outputs = safe_forward_with_cudnn_fallback(model, image_batched)   # 원본 L637: outputs = model(image_batched)
+            output_cols_for_non_protected = output_cols_each_task[:(len(output_cols_each_task))]
+            outputs_this_group = outputs[obs_this_group, :].view(-1, outputs.shape[1])
+            if outputs_this_group.shape[0] < 1 or len(outputs_this_group.shape) < 2:
+                continue
+            targets_this_group = label_batched[obs_this_group, :].view(-1, label_batched.shape[1])
+            loss_non_protected = loss_multi_tasks(outputs_this_group, targets_this_group, criterion, output_cols_for_non_protected)
+            loss = loss_non_protected
+
+            loss.backward()                                       # 원본 L649
+            # optimizer.step()                                    # 원본 L650 → Q2: 점수 계산 중 가중치(+마스크) 갱신. clean 에서는 비활성
+            if faithful:
+                optimizer.step()                                  # faithful 모드에서만 원본 동작 재현
+
+            # 이 그룹의 모든 레이어 기울기 저장 (원본 L653-663)
+            for name, layer in model.named_modules():
+                if type(layer).__name__ in supported_layers:
+                    grads = layer.weight.grad.clone().detach().cpu()
+                    weights = layer.weight.data.clone().detach().cpu()
+                    if masked_grads:
+                        masks = layer.mask.clone().detach().cpu()
+                        mask_at_each_layer[name] = [torch.sum(masks), grads.shape]
+                        grads *= masks
+                    hessians[name] = (weights.abs() * grads.abs()) ** 2
+                    gradients[name] = grads
+            if group_idx not in grad_each_group:
+                grad_each_group[group_idx] = copy.deepcopy(gradients)
+                H_each_group[group_idx] = copy.deepcopy(hessians)
+            else:
+                for name, layer in model.named_modules():
+                    if type(layer).__name__ in supported_layers:
+                        grad_each_group[group_idx][name] += gradients[name]
+                        H_each_group[group_idx][name] += hessians[name]
+
+    if batches == 0 or not H_each_group:
+        raise RuntimeError("fg_orig_importance_by_group: 처리된 배치/그룹이 없습니다 (stop_batch 또는 데이터 확인).")
+
+    # 원본 L673-676: 루프 잔존 변수 group_idx (= 마지막 그룹) 에만 /= batches → Q3
+    if faithful:
+        for name, layer in model.named_modules():
+            if type(layer).__name__ in supported_layers:
+                grad_each_group[group_idx][name] /= batches       # 원본 그대로 (마지막 그룹만)
+                H_each_group[group_idx][name] /= batches
+    else:
+        for g in H_each_group:                                    # Q3 수정: 모든 그룹을 batches 로 나눔
+            for name in H_each_group[g]:
+                grad_each_group[g][name] /= batches
+                H_each_group[g][name] /= batches
+
+    print(f"그룹별 중요도 계산 완료: {batches} 배치, {len(H_each_group)} 그룹, {len(next(iter(H_each_group.values())))} 레이어, {time.perf_counter() - t0:.1f}s")
+    return H_each_group
+
+
+def _get_fg_scope_layers(model, scope):
+    """impt_type=4 프루닝 대상 레이어 이름 집합.
+    'blocks': features.1~17 의 conv0/conv1/conv2 (MobileNetV2 기준 50개 Conv2d) — impt_type=2/3 와 같은 범위.
+    'all'   : supported_layers 이면서 weight 가 있는 모든 레이어 (Conv2d 52 + Linear 1 = 53개)."""
+    modules = dict(model.named_modules())
+    if scope == 'all':
+        return [name for name, layer in model.named_modules()
+                if type(layer).__name__ in supported_layers and hasattr(layer, 'weight')]
+    if scope == 'blocks':
+        names = []
+        for block_num in range(1, 18):
+            for ln in _get_impt_type2_block_layer_names(f'features.{block_num}'):
+                if ln is not None and ln in modules and hasattr(modules[ln], 'weight'):
+                    names.append(ln)
+        return names
+    raise ValueError(f"fg_scope 는 'blocks' 또는 'all' 이어야 합니다. 현재: {scope}")
+
+
+def fg_orig_greedy_masks(model, H_each_group, prune_ratio, scope_layers, para_batch=1, delta_p=0):
+    """원본 fairness_grad(impt_type=0) 의 (a) 레이어별 target 점유율 → (b) 그룹축 병합 → (c) 활성 가중치 그룹별 정렬
+    → (d) greedy 선택 을 numpy flat-index 로 옮긴 것. 픽 1회당 torch 스칼라 인덱싱 대신 numpy/list 연산만 사용.
+
+    반환: (mask_list, stats)
+      mask_list: named_modules 순서로 supported 레이어의 마스크 (weight shape, float, device). 범위 밖 레이어는 현재 마스크 그대로.
+      stats    : 레이어별 dict 리스트 (로그용)."""
+    groups = sorted(H_each_group.keys())
+    n_classes = len(groups)
+    scope_set = set(scope_layers)
+    layer_names = list(H_each_group[groups[0]].keys())
+
+    # (a) 레이어별 target 점유율: 그룹 g 의 Σ|H_g[layer]| / Σ_g Σ|H_g[layer]|   (원본 L476-497)
+    grad_target = {}
+    for name in layer_names:
+        # 원본과 같은 float32 torch 연산 경로로 계산: torch.sum(|H_g|) (0-d float32) → python sum → grad/sum → np.array(float32).
+        # float64 로 만들면 greedy 의 argmin(prop − target) 이 |prop − target| ≈ 0 인 순간에 다른 그룹을 골라 결과가 어긋난다.
+        sums_t = [H_each_group[g][name].abs().sum() for g in groups]          # 원본 L476-479
+        total_t = sum(sums_t)                                                   # 원본 L487: sum(grad_this_layer) (float32 tensor)
+        if float(total_t) > 0:
+            grad_target[name] = np.array([(s / total_t) for s in sums_t])      # 원본 L487 → dtype float32
+        else:
+            # 원본은 sum 이 0 이면 nan 이 되어 argmin 이 항상 0 을 고른다. 0 나눗셈만 막고(균등 target) 나머지는 그대로.
+            grad_target[name] = np.full(n_classes, 1.0 / n_classes, dtype=np.float32)
+
+    mask_by_layername = {}
+    stats = []
+    for name, layer in model.named_modules():
+        if type(layer).__name__ not in supported_layers or not hasattr(layer, 'weight'):
+            continue
+        numel = int(layer.weight.numel())
+        cur_mask = layer.mask.detach().cpu() if hasattr(layer, 'mask') else torch.ones_like(layer.weight).cpu()
+        active_before = int((cur_mask != 0).sum().item())
+
+        if name not in scope_set:
+            # 범위 밖: 현재 마스크 그대로 (프루닝하지 않음)
+            mask_by_layername[name] = layer.mask.detach().clone() if hasattr(layer, 'mask') else torch.ones_like(layer.weight)
+            stats.append({'name': name, 'numel': numel, 'active_before': active_before, 'keep_target': active_before,
+                          'kept': active_before, 'removed': 0, 'in_scope': False,
+                          'target_prop': grad_target.get(name), 'selected_prop': None, 'picks': 0})
+            continue
+
+        # (b) 그룹축을 마지막 차원으로 병합 (원본 make_mask_by_grad) → flat [numel, n_classes]
+        H_stack = np.stack([H_each_group[g][name].reshape(-1).numpy() for g in groups], axis=1)
+        # (c) 활성 가중치만 후보 (원본 L504-506: selected = layer.mask; idxs = selected.nonzero())
+        active_idx = np.flatnonzero(cur_mask.reshape(-1).numpy() != 0)
+        G = H_stack[active_idx].astype(np.float32, copy=True)                       # [n_active, n_classes]
+        sum_per_node = G.sum(axis=1)
+        sorted_idx_by_race = []
+        G_by_race = []
+        for race in range(n_classes):
+            race_col = G[:, race]                                                     # 원본과 같이 G 의 view (in-place 갱신이 G 에 반영)
+            if delta_p == 1:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    race_col /= sum_per_node
+            elif delta_p == 2:
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    race_col *= (race_col / sum_per_node)
+            order = np.argsort(-G[:, race], kind='stable')                            # 원본 torch.topk(sorted=True) 내림차순 (동률 순서만 다를 수 있음)
+            sorted_idx_by_race.append(active_idx[order].tolist())                     # 정렬된 flat index (python list: 스칼라 접근이 빠름)
+            G_by_race.append(G[order].astype(np.float64, copy=True))                  # 정렬 시점의 G 스냅샷 (원본 grad_this_layer[sorted_idx])
+
+        # (d) greedy (원본 L523-561)
+        num_to_select = int(numel * (1 - prune_ratio))                                # 전체 numel 기준 (활성 수 아님)
+        mask_flat = np.zeros(numel, dtype=np.uint8)
+        n_selected = 0
+        grads_by_race_selected = np.zeros(n_classes, dtype=np.float64)
+        grads_prop_by_race = np.full(n_classes, 1.0 / n_classes, dtype=np.float64)
+        ptr = [0] * n_classes
+        last_race_updated = 0
+        race_to_add = 0
+        picks = 0
+        grad_target_this_layer = grad_target[name]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            while n_selected < num_to_select:
+                # 현재 점유율이 target 대비 가장 부족한 그룹
+                if last_race_updated == 0:
+                    race_to_add = int((grads_prop_by_race - grad_target_this_layer).argmin())
+                last_race_updated = last_race_updated + 1 if last_race_updated < para_batch else 0
+                i = ptr[race_to_add]
+                idx = sorted_idx_by_race[race_to_add][i]
+                if mask_flat[idx] == 0:                                                 # 아직 선택되지 않은 가중치만 추가
+                    n_selected += 1
+                    grads_by_race_selected += G_by_race[race_to_add][i]
+                    grads_prop_by_race = grads_by_race_selected / grads_by_race_selected.sum()
+                    mask_flat[idx] = 1
+                ptr[race_to_add] += 1
+                picks += 1
+
+        mask_t = torch.from_numpy(mask_flat).to(torch.float32).view(layer.weight.shape)
+        mask_by_layername[name] = mask_t
+        kept = int(mask_flat.sum())
+        stats.append({'name': name, 'numel': numel, 'active_before': active_before, 'keep_target': num_to_select,
+                      'kept': kept, 'removed': active_before - kept, 'in_scope': True,
+                      'target_prop': grad_target_this_layer, 'selected_prop': grads_prop_by_race.copy(), 'picks': picks})
+
+    # Prunner.prune 이 named_modules 순서로 pop(0) 하므로 같은 순서·개수로 반환
+    mask_list = [mask_by_layername[name].to(device) for name, layer in model.named_modules()
+                 if type(layer).__name__ in supported_layers and hasattr(layer, 'weight')]
+    return mask_list, stats
+
+
+def _save_fg_orig_pruning_log(stats, prune_ratio, prune_iter, mode, scope, t_score=None, t_greedy=None, model=None,
+                              para_batch=None, delta_p=None, log_dir='fg_orig_pruning_logs'):
+    """impt_type=4 로그: fg_orig_pruning_logs/<dataset>_impt4_seed<seed>_<mode>_<scope>_<시각>/iterNN.txt"""
+    import datetime
+    import config as _config
+    log_dir = _get_pruning_log_run_dir(log_dir, 'glo_fg_log_run_dir')
+    filepath = os.path.join(log_dir, f"iter{prune_iter + 1:02d}.txt")
+
+    total_params = _count_total_weights(model) if model is not None else sum(s['numel'] for s in stats)
+    active_before_all = sum(s['active_before'] for s in stats)
+    active_after_all = sum(s['kept'] for s in stats)
+    scope_numel = sum(s['numel'] for s in stats if s['in_scope'])
+    scope_active_after = sum(s['kept'] for s in stats if s['in_scope'])
+
+    def _fmt_prop(p):
+        return '-' if p is None else '(' + ','.join(f"{float(v):.3f}" for v in p) + ')'
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write("=" * 80 + "\n")
+        f.write("FairGRAPE-orig Weight Pruning Log (impt_type=4)\n")
+        f.write(f"  dataset      : {getattr(_config, 'glo_dataset', None)}\n")
+        f.write(f"  seed         : {getattr(_config, 'glo_seed', None)}\n")
+        f.write(f"  iteration    : {prune_iter + 1}\n")
+        f.write(f"  prune_ratio  : {prune_ratio:.6f} (누적, 레이어별 keep_target = int(numel × (1 − prune_ratio)))\n")
+        f.write(f"  FG_ORIG_MODE : {mode}\n")
+        f.write(f"  fg_scope     : {scope} ({sum(1 for s in stats if s['in_scope'])} layers)\n")
+        f.write(f"  para_batch   : {para_batch}\n")
+        f.write(f"  delta_p      : {delta_p}\n")
+        f.write(f"  timestamp    : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        if t_score is not None:
+            f.write(f"  t_score      : {t_score:.1f}s (그룹별 점수 pass)\n")
+        if t_greedy is not None:
+            f.write(f"  t_greedy     : {t_greedy:.1f}s (greedy 선택)\n")
+        f.write(f"  total_params        : {total_params}\n")
+        f.write(f"  active_before/after : {active_before_all} / {active_after_all}\n")
+        f.write(f"  sparsity_all        : {(1 - active_after_all / total_params) * 100:.2f}% (Conv2d+Linear 전체 대비)\n")
+        f.write(f"  sparsity_scope      : {(1 - scope_active_after / scope_numel) * 100 if scope_numel else 0.0:.2f}% (범위 레이어 numel 대비)\n")
+        f.write("=" * 80 + "\n\n")
+        f.write("[ 레이어별 greedy 선택 현황 ]\n")
+        f.write("  (target_prop: dense/현재 모델의 그룹별 중요도 점유율, selected_prop: greedy 종료 시 선택된 가중치의 그룹별 점유율.\n")
+        f.write("   clean 모드면 두 값이 근접해야 정상. picks: greedy 루프 반복 횟수(중복 픽 포함). scope=N 은 범위 밖 레이어)\n")
+        f.write(f"  {'layer':<28} {'scope':>5} {'numel':>9} {'active':>9} {'keep_tgt':>9} {'kept':>9} {'removed':>8} "
+                f"{'target_prop':>18} {'selected_prop':>18} {'picks':>9}\n")
+        f.write("  " + "-" * 130 + "\n")
+        for s in stats:
+            f.write(f"  {s['name']:<28} {'Y' if s['in_scope'] else 'N':>5} {s['numel']:>9} {s['active_before']:>9} "
+                    f"{s['keep_target']:>9} {s['kept']:>9} {s['removed']:>8} "
+                    f"{_fmt_prop(s['target_prop']):>18} {_fmt_prop(s['selected_prop']):>18} {s['picks']:>9}\n")
+    print(f"[FairGRAPE-orig pruning 로그 저장] {filepath}")
 
 
 def compute_importance(model, gender_model, test_csv, new_img_dir=None, masked_grads=True, output_cols_each_task=[(0,7),(7,9),(9,18)], col_names=['race','gender'],network=None,optimizer=None, lr=1e-4, stop_batch=10000, sensitive_group=None, sensitive_classes=None, imp_batch_size=384):
