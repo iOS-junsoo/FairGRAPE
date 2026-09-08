@@ -58,6 +58,12 @@ def experiment(args):
     config.glo_seed = seed
     config.glo_phi_analysis = args.phi_analysis  # φ 구성요소(gap/grad) 분리 분석 로그 저장 여부
     config.glo_phi_gap_only = args.phi_gap_only  # 비교 실험: 공정성 기여도로 activation gap만 사용 (gradient 미적용)
+    config.glo_perf_only = args.perf_only  # baseline 실험: φ 미사용, 성능 기여도 원시값만으로 전역 프루닝 (impt_type=2/3)
+    if args.perf_only:
+        if args.impt not in (2, 3):
+            raise ValueError(f"--perf_only는 --impt 2 또는 3에서만 사용할 수 있습니다. 현재: --impt {args.impt}")
+        if args.phi_analysis or args.phi_gap_only:
+            raise ValueError("--perf_only는 φ를 계산하지 않으므로 --phi_analysis / --phi_gap_only와 동시에 사용할 수 없습니다.")
 
     # 실험 시작 전에 결과 저장 폴더(retrain_epoch_results/임시 저장소/<dataset>_impt<impt>_seed<seed>_<시각>)를 미리 생성
     from train_and_val import _get_results_run_dir
@@ -405,7 +411,7 @@ def experiment(args):
         ckpt_tag = os.path.splitext(os.path.basename(checkpoint))[0][:60]
         stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         config.glo_channel_log_run_dir = os.path.join(
-            '/workspace/FairGRAPE/FairGRAPE/channel_score_recompute',
+            'channel_score_recompute',
             f'{stamp}_{dataset}_alpha{_so_alpha}_{_so_norm}_{ckpt_tag}')
         os.makedirs(config.glo_channel_log_run_dir, exist_ok=True)
 
@@ -864,6 +870,8 @@ if __name__ == "__main__":
     parser.add_argument('--score_only', action='store_true', help='저장된 프루닝 체크포인트(--checkpoint)의 채널별 성능/공정성 기여도만 재계산해 channel_pruning_logs/score_only_*/에 저장하고 종료 (프루닝·재학습·모델 저장 없음)')
     parser.add_argument('--phi_analysis', action='store_true', help='impt_type=2에서 φ의 두 인자(activation gap, mean|activation grad|)를 채널별로 분리해 phi_component_analysis/에 통계·불일치 분석 로그를 저장')
     parser.add_argument('--phi_gap_only', action='store_true', help='비교 실험용: impt_type=2에서 공정성 기여도 φ로 activation gap만 사용 (activation gradient를 곱하지 않음). 로그 폴더에 gaponly 태그가 붙음')
+    parser.add_argument('--perf_only', action='store_true',
+        help='impt_type=2/3: 공정성 기여도 φ를 쓰지 않고 성능 기여도 원시값만으로 전역 프루닝. 정규화 생략, alpha=1.0, gamma=0, floor=0, cap=None을 강제하고 φ 계산을 건너뜀 (baseline 실험 01/02용). 로그 폴더에 perfonly 태그가 붙음')
 
 
 

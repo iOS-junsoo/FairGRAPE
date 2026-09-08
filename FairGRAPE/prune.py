@@ -1301,6 +1301,9 @@ def _get_pruning_log_run_dir(base_dir, cache_attr):
     stamp = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
     # gap-only 비교 실험 런은 폴더명에 태그를 붙여 일반 런과 구분
     tag = '_gaponly' if getattr(_config, 'glo_phi_gap_only', False) else ''
+    # perf-only baseline 런(--perf_only)도 폴더명 태그로 구분
+    if getattr(_config, 'glo_perf_only', False):
+        tag += '_perfonly'
     run_dir = os.path.join(base_dir, f"{ds}_impt{impt}_seed{seed}{tag}_{stamp}")
     os.makedirs(run_dir, exist_ok=True)
     setattr(_config, cache_attr, run_dir)
@@ -1318,7 +1321,7 @@ def _save_channel_pruning_log(
     prune_iter,
     alpha,
     model=None,
-    log_dir='/workspace/FairGRAPE/FairGRAPE/channel_pruning_logs',
+    log_dir='channel_pruning_logs',
     total_model_params=None,
     total_active_after=None,
     model_sparsity=None,
@@ -1337,14 +1340,19 @@ def _save_channel_pruning_log(
     per_layer_removed_w=None,
     cap_relaxed_set=None,
     cap_relaxed_removed=0,
+    norm=None,
 ):
     import datetime
     import config as _config
     # 런별 하위 폴더(<dataset>_impt<impt>_seed<seed>_<첫 저장 시각>)에 iter 로그를 모은다.
     log_dir = _get_pruning_log_run_dir(log_dir, 'glo_channel_log_run_dir')
 
+    # norm: None이면 기존 IMPT2_NORM. --perf_only 런은 'raw'(정규화 없음)를 넘긴다.
+    norm = IMPT2_NORM if norm is None else str(norm)
+    # perf_only(raw)는 score가 perf 원시값(매우 작은 제곱값)이라 지수 표기로 기록
+    score_fmt = '.6e' if norm == 'raw' else '.6f'
     # rank 정규화 런은 파일명에 태그를 붙여 기존 max 런 로그를 덮어쓰지 않게 한다.
-    norm_tag = '' if IMPT2_NORM == 'max' else f"_{IMPT2_NORM}"
+    norm_tag = '' if norm == 'max' else f"_{norm}"
     filename = f"alpha{alpha:.1f}{norm_tag}_iter{prune_iter + 1:02d}.txt"
     filepath = os.path.join(log_dir, filename)
 
@@ -1379,7 +1387,7 @@ def _save_channel_pruning_log(
         f.write(f"  seed       : {getattr(_config, 'glo_seed', None)}\n")
         f.write(f"  iteration  : {prune_iter + 1}\n")
         f.write(f"  alpha      : {alpha:.4f}\n")
-        f.write(f"  norm       : {IMPT2_NORM}\n")
+        f.write(f"  norm       : {norm}\n")
         f.write(f"  timestamp  : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"  remove_target  : {remove_target}\n")
         f.write(f"  accum_removed  : {accum_removed}\n")
@@ -1497,7 +1505,7 @@ def _save_channel_pruning_log(
 
             relaxed_tag = ' relaxed' if cap_relaxed_set and key in cap_relaxed_set else ''
             f.write(
-                f"{block_name:<30} {channel_k:>5} {score:>12.6f} "
+                f"{block_name:<30} {channel_k:>5} {score:>12{score_fmt}} "
                 f"{phi_val:>12.6e} {perf_val:>12.6e} "
                 f"{phi_n_val:>8.4f} {perf_n_val:>8.4f} {weight_count:>8}{relaxed_tag}\n"
             )
@@ -1550,7 +1558,7 @@ def _save_channel_pruning_log(
                     score = alpha * perf_n_val - (1.0 - alpha) * phi_n_val
 
                 f.write(
-                    f"{prune_iter + 1},{block_name},{channel_k},{status},{score:.6f},"
+                    f"{prune_iter + 1},{block_name},{channel_k},{status},{score:{score_fmt}},"
                     f"{phi_vec[channel_k].item():.6e},{perf_vec[channel_k].item():.6e},"
                     f"{phi_n_val:.4f},{perf_n_val:.4f},{weight_count}\n"
                 )
@@ -1621,7 +1629,7 @@ def _save_phi_component_analysis(
     gap_by_layer,
     mean_grad_by_layer,
     phi_by_layer,
-    log_dir='/workspace/FairGRAPE/FairGRAPE/phi_component_analysis',
+    log_dir='phi_component_analysis',
 ):
     """φ = activation_gap × mean|activation_grad| 의 두 인자를 분리 저장하는 분석 로그.
     --phi_analysis 플래그가 켜진 런에서만 호출된다. 프루닝 로직에는 영향 없음.
@@ -1773,7 +1781,7 @@ def _save_weight_pruning_log(
     model_sparsity=None,
     worst_selected=None,
     norm=None,
-    log_dir='/workspace/FairGRAPE/FairGRAPE/weight_pruning_logs',
+    log_dir='weight_pruning_logs',
 ):
     """impt_type=3 가중치 pruning 로그. channel_pruning_logs와 동형 포맷.
     per_layer_stats: [{'name', 'numel', 'active_before', 'protected', 'eligible', 'removed',
@@ -1827,7 +1835,9 @@ def _save_weight_pruning_log(
             phi_med = stat.get('removed_phi_med')
             perf_med = stat.get('removed_perf_med')
             phi_str = f"{phi_med:.3f}" if phi_med is not None else "-"
-            perf_str = f"{perf_med:.3f}" if perf_med is not None else "-"
+            # raw(--perf_only) 모드는 정규화 없는 perf 원시값(매우 작은 제곱값)이라 지수 표기
+            _perf_fmt = '.3e' if norm == 'raw' else '.3f'
+            perf_str = f"{perf_med:{_perf_fmt}}" if perf_med is not None else "-"
             f.write(
                 f"  {stat['name']:<30} {numel:>9} {active_before:>9} {stat['protected']:>8} "
                 f"{removed:>8} {cumul_after:>9} {ratio:>7.1f}% {phi_str:>7} {perf_str:>8}\n"
@@ -2338,7 +2348,22 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         
         alpha = float(IMPT_TYPE2_ALPHA)
         import config
-        config.glo_imp_rate = alpha  # ← 추가된 줄
+        # --perf_only (baseline 02): φ 미사용·정규화 없음·제약 없음. 상수(IMPT2_*)는 건드리지 않고 지역변수로만 덮어쓴다.
+        perf_only = bool(getattr(config, 'glo_perf_only', False))
+        if perf_only:
+            if getattr(config, 'glo_phi_analysis', False) or getattr(config, 'glo_phi_gap_only', False):
+                raise ValueError("--perf_only는 φ를 계산하지 않으므로 --phi_analysis / --phi_gap_only와 함께 쓸 수 없습니다.")
+            alpha = 1.0
+            gamma = 0.0
+            floor_ratio = 0.0
+            cap_multiplier = None
+            print("impt_type == 2: --perf_only → alpha=1.0, gamma=0, floor=0, cap=None (성능 기여도만, φ 생략)")
+        else:
+            gamma = float(IMPT2_PROTECTION_RATIO)
+            floor_ratio = float(IMPT2_MIN_KEEP_RATIO_PER_LAYER)
+            cap_multiplier = IMPT2_LAYER_CAP_MULTIPLIER
+        norm_label = 'raw' if perf_only else IMPT2_NORM
+        config.glo_imp_rate = alpha  # run_info·로그 파일명용 (perf_only면 1.0)
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"impt_type == 2 의 alpha는 0과 1 사이여야 합니다. 현재 값: {alpha}")
 
@@ -2349,18 +2374,26 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         if not 0.0 < keep_per_iter <= 1.0:
             raise ValueError(f"keep_per_iter는 0 초과 1 이하여야 합니다. 현재: {keep_per_iter}")
 
-        print(f"impt_type == 2: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={IMPT2_NORM}로 채널 단위 fairness-aware pruning 시작")
+        print(f"impt_type == 2: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={norm_label}로 채널 단위 fairness-aware pruning 시작")
 
-        phi_by_layer, phi_weight_by_layer, gap_by_layer, _, mean_grad_by_layer = compute_phi_k(
-            model,
-            test_csv,
-            new_img_dir=new_img_dir,
-            output_cols_each_task=output_cols_each_task,
-            col_names=col_names,
-            stop_batch=stop_batch,
-            masked_grads=masked_grads,
-            sensitive_group=sensitive_group,
-        )
+        if perf_only:
+            # φ 계산 생략: perf_by_layer와 같은 키 집합(features.1 conv.0.0, features.N.conv.1.0, features.18.0)을
+            # 0 벡터로 채워 아래 결합 루프가 그대로 돌게 한다.
+            phi_by_layer = {}
+            for _name, _layer in _get_impt_type2_target_layers(model).items():
+                phi_by_layer[_name] = torch.zeros(int(_layer.weight.shape[0]), dtype=torch.float32, device=device)
+            gap_by_layer, mean_grad_by_layer = {}, {}
+        else:
+            phi_by_layer, phi_weight_by_layer, gap_by_layer, _, mean_grad_by_layer = compute_phi_k(
+                model,
+                test_csv,
+                new_img_dir=new_img_dir,
+                output_cols_each_task=output_cols_each_task,
+                col_names=col_names,
+                stop_batch=stop_batch,
+                masked_grads=masked_grads,
+                sensitive_group=sensitive_group,
+            )
 
         if getattr(config, 'glo_phi_analysis', False):
             _save_phi_component_analysis(gap_by_layer, mean_grad_by_layer, phi_by_layer)
@@ -2424,15 +2457,14 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             if combined is not None:
                 perf_by_layer[ref_name] = combined
 
-        # ── 보호 영역(γ): 각 레이어 perf 상위 γ% 채널을 후보 풀에서 제외 ──
-        gamma = float(IMPT2_PROTECTION_RATIO)
+        # ── 보호 영역(γ): 각 레이어 perf 상위 γ% 채널을 후보 풀에서 제외 (gamma는 분기 시작부에서 결정) ──
         if not 0.0 <= gamma <= 1.0:
             raise ValueError(f"IMPT2_PROTECTION_RATIO는 0~1 사이여야 합니다. 현재: {gamma}")
-        if IMPT2_LAYER_CAP_MULTIPLIER is not None and IMPT2_LAYER_CAP_MULTIPLIER <= 0:
+        if cap_multiplier is not None and cap_multiplier <= 0:
             # 0이면 전 층 cap=0.0 → 1차 패스가 전 채널을 스킵하고 2차 패스가 전부 담당하는 퇴화 동작
             raise ValueError(
                 f"IMPT2_LAYER_CAP_MULTIPLIER는 None(비활성) 또는 양수여야 합니다. "
-                f"현재: {IMPT2_LAYER_CAP_MULTIPLIER}"
+                f"현재: {cap_multiplier}"
             )
 
         print(f"impt_type == 2: protection_ratio (γ)={gamma:.4f} 적용 — 각 레이어 perf 상위 γ% 보호")
@@ -2464,7 +2496,11 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             block_name = conv1_name.rsplit('.conv.', 1)[0]
 
             weight_counts = [_count_channel_weights(model, block_name, k) for k in range(len(phi_vec))]
-            if IMPT2_NORM == 'rank':
+            if perf_only:
+                # 정규화 생략: perf 원시값이 곧 점수 (17개 블록 통틀어 원시 perf 오름차순으로 전역 제거)
+                perf_scaled = perf_vec.clone()
+                phi_scaled = torch.zeros_like(phi_vec)
+            elif IMPT2_NORM == 'rank':
                 # 활성(미프루닝) 채널만의 순위 백분위(0~1). 프루닝된 채널을 포함해 순위를 매기면
                 # 반복이 진행될수록 활성 채널이 상위 구간으로 밀려 레이어 간 비교가 왜곡된다.
                 active_idx = torch.tensor([k for k, w in enumerate(weight_counts) if w > 0],
@@ -2519,12 +2555,12 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         # 판정(per_layer_removed_w >= cap이면 스킵) 하에서 모든 층이 최소 1채널은 잘릴 수 있다.
         per_layer_cap = None
         per_layer_cand_w = None
-        if IMPT2_LAYER_CAP_MULTIPLIER is not None:
+        if cap_multiplier is not None:
             per_layer_cand_w = defaultdict(int)
             for _s, _bn, _k, _w in score_by_channel:
                 per_layer_cand_w[_bn] += _w
             per_layer_cap = {
-                bn: IMPT2_LAYER_CAP_MULTIPLIER * remove_target * (w / candidate_channel_weights)
+                bn: cap_multiplier * remove_target * (w / candidate_channel_weights)
                 for bn, w in per_layer_cand_w.items()
             }
 
@@ -2547,7 +2583,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                     )
 
         per_layer_min_keep = {
-            bn: int(_math.ceil(total_ch * IMPT2_MIN_KEEP_RATIO_PER_LAYER))
+            bn: int(_math.ceil(total_ch * floor_ratio))
             for bn, total_ch in per_layer_original_ch.items()
         }
 
@@ -2648,6 +2684,15 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             f"estimated_removed={accum_removed}, remove_target={remove_target}"
         )
 
+        # 블록 붕괴 감지: 이번 iter 후 활성 채널이 0이 되는 블록 (floor=0인 --perf_only에서 가능).
+        # 막지 않고 결과로 보고만 한다 — 콘솔 경고 + BEST_MODEL_SUMMARY 한 줄(config.glo_collapse_notes).
+        for bn in sorted(per_layer_select_count.keys(), key=lambda x: int(x.split('.')[1])):
+            remaining = per_layer_original_ch.get(bn, 0) - per_layer_already_removed[bn] - per_layer_select_count[bn]
+            if remaining <= 0:
+                note = f"iter {config.glo_prune_iter + 1}: BLOCK COLLAPSE {bn} (활성 채널 0/{per_layer_original_ch.get(bn, 0)})"
+                print(f"⚠ BLOCK COLLAPSE: {bn} — 이번 iter 후 활성 채널 0 (원본 {per_layer_original_ch.get(bn, 0)}ch)")
+                config.glo_collapse_notes.append(note)
+
         if accum_removed < remove_target:
             print(
                 f"⚠ remove_target 미달: γ={gamma:.2f} + floor 제약으로 "
@@ -2684,7 +2729,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             prune_iter=_config.glo_prune_iter,
             alpha=alpha,
             model=model,
-            log_dir='/workspace/FairGRAPE/FairGRAPE/channel_pruning_logs',
+            log_dir='channel_pruning_logs',
             total_model_params=total_model_params,
             total_active_after=total_active_after,
             model_sparsity=model_sparsity,
@@ -2694,7 +2739,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             phi_scaled_by_layer=phi_scaled_by_layer_ch,
             perf_scaled_by_layer=perf_scaled_by_layer_ch,
             protected_set=protected_set,
-            cap_multiplier=IMPT2_LAYER_CAP_MULTIPLIER,
+            cap_multiplier=cap_multiplier,
             per_layer_cap=per_layer_cap,
             per_layer_candidate_weights=per_layer_cand_w,
             skipped_by_cap=skipped_by_cap,
@@ -2703,6 +2748,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             per_layer_removed_w=per_layer_removed_w,
             cap_relaxed_set=cap_relaxed_set,
             cap_relaxed_removed=cap_relaxed_removed,
+            norm=norm_label,
         )
 
         # 최종 마스크 리스트 반환 (layer 순서 유지)
@@ -2719,7 +2765,17 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         #                 블록 내 순위 백분위('rank') 또는 블록 max 나눗셈('max'))
         alpha = float(IMPT_TYPE3_ALPHA)
         import config
-        config.glo_imp_rate = alpha
+        # --perf_only (baseline 01): φ 미사용·정규화 없음·제약 없음. 상수(IMPT2_*/IMPT3_*)는 건드리지 않고 지역변수로만 덮어쓴다.
+        perf_only = bool(getattr(config, 'glo_perf_only', False))
+        if perf_only:
+            alpha = 1.0
+            gamma = 0.0
+            floor_ratio = 0.0
+            print("impt_type == 3: --perf_only → alpha=1.0, gamma=0, floor=0 (성능 기여도만 사용, φ 계산 생략)")
+        else:
+            gamma = float(IMPT2_PROTECTION_RATIO)
+            floor_ratio = float(IMPT2_MIN_KEEP_RATIO_PER_LAYER)
+        config.glo_imp_rate = alpha  # run_info·로그 파일명용 (perf_only면 1.0)
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"impt_type == 3 의 alpha는 0과 1 사이여야 합니다. 현재 값: {alpha}")
 
@@ -2731,20 +2787,38 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         norm_mode = str(IMPT3_NORM)
         if norm_mode not in ('rank', 'max'):
             raise ValueError(f"IMPT3_NORM은 'rank' 또는 'max' 여야 합니다. 현재: {norm_mode}")
+        if perf_only:
+            norm_mode = 'raw'  # 정규화 없음 (IMPT3_NORM 상수는 그대로 둠)
 
         print(f"impt_type == 3: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={norm_mode}로 가중치 단위 fairness-aware pruning 시작")
 
-        _, _, gap_by_layer, block_wgrad_by_layer, _ = compute_phi_k(
-            model,
-            test_csv,
-            new_img_dir=new_img_dir,
-            output_cols_each_task=output_cols_each_task,
-            col_names=col_names,
-            stop_batch=stop_batch,
-            masked_grads=masked_grads,
-            sensitive_group=sensitive_group,
-            collect_block_weight_grads=True,
-        )
+        if perf_only:
+            # φ 계산 생략. 아래 블록 루프의 shape 검사를 그대로 통과시키기 위해 gap/wgrad를 0으로 채운다
+            # (φ는 정규화 분기 자체를 건너뛰므로 어디에도 쓰이지 않는다).
+            _modules_tmp = dict(model.named_modules())
+            gap_by_layer, block_wgrad_by_layer = {}, {}
+            for _block_num in range(1, 18):
+                _bn = f'features.{_block_num}'
+                _c0, _c1, _c2 = _get_impt_type2_block_layer_names(_bn)
+                _ref = _c1 if _c1 is not None else _c0
+                if _ref not in _modules_tmp:
+                    continue
+                gap_by_layer[_ref] = torch.zeros(int(_modules_tmp[_ref].weight.shape[0]), dtype=torch.float64, device=device)
+                for _cn in (_c0, _c1, _c2):
+                    if _cn is not None and _cn in _modules_tmp:
+                        block_wgrad_by_layer[_cn] = torch.zeros_like(_modules_tmp[_cn].weight, dtype=torch.float64)
+        else:
+            _, _, gap_by_layer, block_wgrad_by_layer, _ = compute_phi_k(
+                model,
+                test_csv,
+                new_img_dir=new_img_dir,
+                output_cols_each_task=output_cols_each_task,
+                col_names=col_names,
+                stop_batch=stop_batch,
+                masked_grads=masked_grads,
+                sensitive_group=sensitive_group,
+                collect_block_weight_grads=True,
+            )
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -2813,7 +2887,16 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                 continue
 
             # 정규화 단위는 블록 (conv0+conv1+conv2 공통) — impt_type == 2와 동일한 단위
-            if norm_mode == 'rank':
+            if perf_only:
+                # 정규화 생략: perf 원시값(float64 유지 — 매우 작은 제곱값의 동률·언더플로 방지)이 곧 점수.
+                # 50개 conv의 활성 가중치를 원시 perf 하나로 전역 정렬한다. φ는 어디에도 쓰지 않는다.
+                for conv_name in perf_parts:
+                    raw = torch.nan_to_num(perf_parts[conv_name], nan=0.0, posinf=0.0, neginf=0.0).to(torch.float64).cpu()
+                    score_by_layer[conv_name] = raw
+                    perf_w_by_layer[conv_name] = raw
+                    perf_scaled_by_layer[conv_name] = raw  # 로그용 (정규화 안 했으므로 raw)
+                    # phi_scaled_by_layer는 채우지 않는다 → 로그의 rm_phi 열이 '-'로 남는다
+            elif norm_mode == 'rank':
                 # 블록 내 '활성' 가중치 전체를 한 줄로 모아 순위 백분위(0~1)로 정규화.
                 # perf(제곱 heavy-tail)와 φ가 같은 균등 스케일이 되어 alpha가 실제 혼합 비율로 작동.
                 # 비활성(이미 프루닝된) 가중치는 순위 계산에서 제외 (후보에서도 제외되므로 값 무관).
@@ -2872,8 +2955,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             print("impt_type == 3: 제거 가능한 가중치 점수를 만들지 못해 기존 마스크를 그대로 반환합니다.")
             return _build_weight_mask_list(model, {}, device)
 
-        # ── 레이어별 후보 선별: 활성(mask=1) ∧ γ 보호 제외 ∧ 최소 유지(floor) 이내 ──
-        gamma = float(IMPT2_PROTECTION_RATIO)
+        # ── 레이어별 후보 선별: 활성(mask=1) ∧ γ 보호 제외 ∧ 최소 유지(floor) 이내 (gamma는 분기 시작부에서 결정) ──
         if not 0.0 <= gamma <= 1.0:
             raise ValueError(f"IMPT2_PROTECTION_RATIO는 0~1 사이여야 합니다. 현재: {gamma}")
         print(f"impt_type == 3: protection_ratio (γ)={gamma:.4f} 적용 — 각 레이어 perf 상위 γ% 가중치 보호")
@@ -2927,7 +3009,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                 continue
 
             # 레이어 최소 유지: 이번 iter 제거 후에도 active ≥ ceil(numel × 최소비율)
-            min_keep = int(_math.ceil(numel * IMPT2_MIN_KEEP_RATIO_PER_LAYER))
+            min_keep = int(_math.ceil(numel * floor_ratio))
             removable_cap = max(0, n_active - min_keep)
             k_eligible = min(removable_cap, int(candidate_idx.numel()))
             if k_eligible <= 0:
@@ -2987,13 +3069,24 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         # perf 중앙값이 낮고 φ 중앙값이 높으면 φ-주도 제거(위험 신호), 반대면 perf-주도.
         for stat in per_layer_stats:
             sel_idx = selected_by_layer.get(stat['name'])
-            if sel_idx is not None and sel_idx.numel() > 0 and stat['name'] in phi_scaled_by_layer:
+            if sel_idx is None or sel_idx.numel() == 0:
+                continue
+            if stat['name'] in phi_scaled_by_layer:
                 stat['removed_phi_med'] = float(
                     phi_scaled_by_layer[stat['name']].view(-1)[sel_idx].median().item()
                 )
+            if stat['name'] in perf_scaled_by_layer:
                 stat['removed_perf_med'] = float(
                     perf_scaled_by_layer[stat['name']].view(-1)[sel_idx].median().item()
                 )
+
+        # 레이어 붕괴 감지: 이번 iter 후 활성 가중치가 0이 되는 conv (floor=0인 --perf_only에서 가능).
+        # 막지 않고 결과로 보고만 한다 — 콘솔 경고 + BEST_MODEL_SUMMARY 한 줄(config.glo_collapse_notes).
+        for stat in per_layer_stats:
+            if stat['active_before'] > 0 and stat['active_before'] - stat['removed'] <= 0:
+                note = f"iter {config.glo_prune_iter + 1}: LAYER COLLAPSE {stat['name']} (활성 가중치 0/{stat['numel']})"
+                print(f"⚠ LAYER COLLAPSE: {stat['name']} — 이번 iter 후 활성 가중치 0 (numel {stat['numel']})")
+                config.glo_collapse_notes.append(note)
 
         for stat in per_layer_stats:
             if stat['removed'] > 0:

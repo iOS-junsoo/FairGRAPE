@@ -32,18 +32,25 @@ def _get_model_run_dir():
     # (impt_type에 알파/정규화 개념이 없으면 해당 부분은 생략된다)
     name_parts = [run_started.strftime("%Y%m%d_%H%M%S"),
                   str(getattr(config, 'glo_dataset', None) or 'unknown')]
+    perf_only = bool(getattr(config, 'glo_perf_only', False))
     try:
         import prune as _p
         if impt_type == 1:
             name_parts.append(f"alpha{_p.IMPT_TYPE1_ALPHA}")
+        elif impt_type == 2 and perf_only:
+            name_parts += ['alpha1.0', 'raw']
         elif impt_type == 2:
             name_parts += [f"alpha{_p.IMPT_TYPE2_ALPHA}", str(_p.IMPT2_NORM)]
+        elif impt_type == 3 and perf_only:
+            name_parts += ['alpha1.0', 'raw']
         elif impt_type == 3:
             name_parts += [f"alpha{_p.IMPT_TYPE3_ALPHA}", str(_p.IMPT3_NORM)]
     except Exception:  # noqa: BLE001 — 폴더명 구성 실패가 저장 자체를 막으면 안 됨
         pass
     name_parts.append(f"impt{impt_type}")
     name_parts.append(f"seed{getattr(config, 'glo_seed', None)}")
+    if perf_only:
+        name_parts.append('perfonly')
     run_dir = os.path.join('save_models', "_".join(name_parts))
     os.makedirs(run_dir, exist_ok=True)
 
@@ -53,6 +60,13 @@ def _get_model_run_dir():
         import prune as _prune
         if impt_type == 1:
             alpha_lines.append(f"적용 알파: IMPT_TYPE1_ALPHA = {_prune.IMPT_TYPE1_ALPHA}")
+        elif impt_type == 2 and perf_only:
+            alpha_lines.append(f"적용 알파: 1.0 (--perf_only 강제; IMPT_TYPE2_ALPHA={_prune.IMPT_TYPE2_ALPHA} 미적용)")
+            alpha_lines.append(f"정규화 방식: perf_only: 정규화 없음(raw) (IMPT2_NORM='{_prune.IMPT2_NORM}' 미적용)")
+            alpha_lines.append(f"keep_per_iter(iter당 유지율): {getattr(config, 'glo_keep_per_iter', None)}")
+            alpha_lines.append("보호 비율(γ) = 0.0 (--perf_only 강제)")
+            alpha_lines.append("레이어 최소 유지(floor) = 0.0 (--perf_only 강제)")
+            alpha_lines.append("층별 제거 상한(cap) = None (--perf_only 강제)")
         elif impt_type == 2:
             alpha_lines.append(f"적용 알파: IMPT_TYPE2_ALPHA = {_prune.IMPT_TYPE2_ALPHA}")
             alpha_lines.append(f"정규화 방식 IMPT2_NORM = '{_prune.IMPT2_NORM}'")
@@ -60,6 +74,12 @@ def _get_model_run_dir():
             alpha_lines.append(f"보호 비율 IMPT2_PROTECTION_RATIO(γ) = {_prune.IMPT2_PROTECTION_RATIO}")
             alpha_lines.append(f"레이어 최소 유지 IMPT2_MIN_KEEP_RATIO_PER_LAYER = {_prune.IMPT2_MIN_KEEP_RATIO_PER_LAYER}")
             alpha_lines.append(f"층별 제거 상한 IMPT2_LAYER_CAP_MULTIPLIER = {_prune.IMPT2_LAYER_CAP_MULTIPLIER}")
+        elif impt_type == 3 and perf_only:
+            alpha_lines.append(f"적용 알파: 1.0 (--perf_only 강제; IMPT_TYPE3_ALPHA={_prune.IMPT_TYPE3_ALPHA} 미적용)")
+            alpha_lines.append(f"정규화 방식: perf_only: 정규화 없음(raw) (IMPT3_NORM='{_prune.IMPT3_NORM}' 미적용)")
+            alpha_lines.append(f"keep_per_iter(iter당 유지율): {getattr(config, 'glo_keep_per_iter', None)}")
+            alpha_lines.append("보호 비율(γ) = 0.0 (--perf_only 강제)")
+            alpha_lines.append("레이어 최소 유지(floor) = 0.0 (--perf_only 강제)")
         elif impt_type == 3:
             alpha_lines.append(f"적용 알파: IMPT_TYPE3_ALPHA = {_prune.IMPT_TYPE3_ALPHA}")
             alpha_lines.append(f"정규화 방식 IMPT3_NORM = '{_prune.IMPT3_NORM}'")
@@ -84,6 +104,7 @@ def _get_model_run_dir():
         for line in alpha_lines:
             f.write(f"{line}\n")
         f.write(f"GRL 사용       : {getattr(config, 'glo_use_grl', None)}\n")
+        f.write(f"perf_only      : {perf_only}\n")
 
     print(f"[모델 저장 폴더 생성] {run_dir} (0_run_info.txt 기록 완료)")
     config.glo_model_run_dir = run_dir
@@ -110,6 +131,8 @@ def _get_results_run_dir():
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     # gap-only 비교 실험 런은 폴더명에 태그를 붙여 일반 런과 구분
     tag = '_gaponly' if getattr(config, 'glo_phi_gap_only', False) else ''
+    if getattr(config, 'glo_perf_only', False):
+        tag += '_perfonly'  # perf-only baseline 런(--perf_only) 구분
     run_dir = os.path.join('retrain_epoch_results', '임시 저장소',
                            f"{dataset}_impt{impt_type}_seed{seed}{tag}_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
@@ -751,14 +774,24 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         f.write(f"Alpha: {alpha}\n")
         # impt_type과 점수 정규화 방식 기록 (norm은 impt 2/3에서만 의미 있음)
         _impt_type = getattr(config, 'glo_impt_type', None)
+        _perf_only = bool(getattr(config, 'glo_perf_only', False))
         try:
             import prune as _prune
             _norm = {2: _prune.IMPT2_NORM, 3: _prune.IMPT3_NORM}.get(_impt_type)
         except Exception:  # noqa: BLE001
             _norm = None
+        if _perf_only and _impt_type in (2, 3):
+            _norm = 'raw'  # --perf_only: 정규화 없음
         f.write(f"Impt Type: {_impt_type}\n")
         f.write(f"Norm: {_norm if _norm is not None else '해당 없음'}\n")
+        f.write(f"Perf Only: {_perf_only}\n")
         f.write(f"GRL Enabled: {use_grl}\n")
+        # 층/블록 붕괴(활성 0) 기록 — prune.py가 감지해 config.glo_collapse_notes에 누적
+        _collapse_notes = list(getattr(config, 'glo_collapse_notes', []) or [])
+        if _collapse_notes:
+            f.write("⚠ Collapse (활성 채널/가중치 0이 된 층·블록):\n")
+            for _note in _collapse_notes:
+                f.write(f"  - {_note}\n")
         f.write("\n")
         f.write("-"*80 + "\n")
         f.write("📊 Best Model Performance\n")
