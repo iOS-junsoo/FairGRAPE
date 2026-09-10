@@ -38,7 +38,7 @@ IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정
 IMPT3_NORM = 'rank'
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 # IMPT2_KEEP_PER_ITER = 0.975  # → 명령어 인자 --keep_per_iter (config.glo_keep_per_iter)로 대체됨. 이 값을 바꿔도 반영 안 됨.
-IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03 # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 8%는 유지 (직전 floor 8% 실험과 동일 조건)
+IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.08 # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 8%는 유지 (직전 floor 8% 실험과 동일 조건)
 IMPT2_PROTECTION_RATIO  =0.005  # impt_type=2/3: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
 # impt_type=2: 한 iter에서 층별 제거 가중치 상한 배수. None이면 비활성(기존 동작과 완전 동일).
 # cap[bn] = 배수 × remove_target × (층 bn의 후보 가중치 합 / candidate_channel_weights)
