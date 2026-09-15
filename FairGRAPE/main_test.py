@@ -24,7 +24,7 @@ def experiment(args):
     # (1) 명령줄 인자 로드 & 기본 설정
     # -----------------------
     checkpoint = args.checkpoint  # 이전에 이미 가지치기가 적용된 모델(체크포인트) 경로
-    dataset = args.dataset  # ['UTKFace', 'FairFace', "CelebA", "Imagenet", "ImbalancedFairFace"]
+    dataset = args.dataset  # ['UTKFace', 'FairFace', "CelebA", "Imagenet", "ImbalancedFairFace", "DogsCats"]
     network = args.network  # ['resnet34', 'mobilenetv2']
     loss_type = args.loss_type  # ['race', 'raceAndgender', 'gender', 'attrs', 'class']
     sensitive_group = args.sensitive_group  # ['race', 'raceAndgender', 'gender']
@@ -58,6 +58,7 @@ def experiment(args):
     config.glo_seed = seed
     config.glo_phi_analysis = args.phi_analysis  # φ 구성요소(gap/grad) 분리 분석 로그 저장 여부
     config.glo_phi_gap_only = args.phi_gap_only  # 비교 실험: 공정성 기여도로 activation gap만 사용 (gradient 미적용)
+    config.glo_pretrained = not args.no_pretrained  # 무작위 초기화 학습 여부 (결과 폴더·unpruned 파일명에 _scratch 태그)
     config.glo_perf_only = args.perf_only  # baseline 실험: φ 미사용, 성능 기여도 원시값만으로 전역 프루닝 (impt_type=2/3)
     config.glo_fg_scope = args.fg_scope  # baseline 실험 03/04: impt_type=4(원본 FairGRAPE greedy) 프루닝 대상 범위 ('blocks' | 'all')
     config.glo_fg_para_batch = args.para_batch  # impt_type=4 run_info 기록용
@@ -158,6 +159,27 @@ def experiment(args):
         print(f"사용할 CelebA 속성: {col_used}")
         
         epoches = [8, 1, 1]
+    elif dataset == "DogsCats":
+        # Kaggle Dogs vs. Cats + LNL 색상 라벨 (scripts/make_dogscats_csv.py 로 생성).
+        # 타깃=species(cat=0/dog=1), 민감속성=color(dark=0/bright=1).
+        # FSCL(CVPR'22) 설정 재현: --skew_beta 5 → 검은 고양이 5배, 흰 개 5배 편향 train + 균형 val/test.
+        csv = 'csv/DogsCats.csv'
+        face_dir = 'Images/DogsCats'
+        if loss_type != 'species' or sensitive_group != 'color':
+            raise ValueError(f"DogsCats는 --loss_type species --sensitive_group color 조합만 지원합니다. "
+                             f"현재: loss_type={loss_type}, sensitive_group={sensitive_group}")
+        if drop_race or race_binary:
+            raise ValueError("--drop_race / --race_binary 는 DogsCats에서 사용할 수 없습니다.")
+        if not os.path.exists(csv):
+            raise FileNotFoundError(f"{csv} 가 없습니다. 먼저 python scripts/make_dogscats_csv.py 를 실행하세요.")
+        download_dataset(dataset, face_dir)
+        total_classes, output_cols_each_task, col_used_training = 2, [(0, 2)], ['species']
+        col_used = col_used_training + [sensitive_group]
+        epoches = [13, 3, 3]
+        # (species × color) 4셀 층화 8:1:1 분할 + 분할 결과 CSV 저장 (UTKFace race_binary 경로와 동일 프로토콜)
+        frames = make_frame(csv, face_dir, seven_races=False, stratify=True,
+                            strat_cols=['species', 'color'],
+                            split_csv_out='csv/dogscats_split_seed42.csv')
     elif dataset == "Imagenet":
         csv = 'csv/Imagenet.csv'
         face_dir = 'Images/Imagenet'
@@ -172,7 +194,7 @@ def experiment(args):
     else:
         raise NotImplementedError("{} is not implemented!".format(dataset))
 
-    if dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA'] and not skip_readable_check:
+    if dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA', 'DogsCats'] and not skip_readable_check:
         unreadable_report_dir = os.path.join('data_quality_logs', dataset)
         frames = filter_readable_images_in_frames(
             frames,
@@ -186,19 +208,29 @@ def experiment(args):
                 report_dir=unreadable_report_dir,
                 report_prefix='excluded_images_minority',
             )
-    elif dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA']:
+    elif dataset in ['FairFace', 'ImbalancedFairFace', 'UTKFace', 'CelebA', 'DogsCats']:
         print('이미지 가독성 검사를 건너뜁니다 (--skip_readable_check).')
 
     # Phase 2 (FSCL식 편향 주입): 가독성 필터링 이후에 적용해 최종 데이터 기준으로 셀 비율을 맞춘다.
     # 인종과 상관을 주입할 축은 태스크에 따라 결정: 태스크=race면 gender, 태스크=age면 age_bin.
     # train은 White 0:1=β:1 / Non-White 1:β 재표집, val/test는 (race×해당 축) 4셀 완전 균형.
+    # DogsCats: 그룹=species, 축=color → cat dark:bright=β:1, dog 1:β (FSCL: 검은 고양이 β배, 흰 개 β배).
     if skew_beta:
-        if dataset != 'UTKFace' or not race_binary:
-            raise ValueError("--skew_beta는 UTKFace + --race_binary 조합에서만 사용할 수 있습니다.")
-        skew_col = 'age_bin' if loss_type == 'age' else 'gender'
-        frames['train'] = apply_fscl_skew(frames['train'], skew_beta, skew_col=skew_col)
-        frames['val'] = make_balanced_eval(frames['val'], cols=('race', skew_col))
-        frames['test'] = make_balanced_eval(frames['test'], cols=('race', skew_col))
+        if dataset == 'DogsCats':
+            group_col, skew_col = 'species', 'color'
+        elif dataset == 'UTKFace' and race_binary:
+            group_col = 'race'
+            skew_col = 'age_bin' if loss_type == 'age' else 'gender'
+        else:
+            raise ValueError("--skew_beta는 UTKFace + --race_binary 조합 또는 DogsCats에서만 사용할 수 있습니다.")
+        frames['train'] = apply_fscl_skew(frames['train'], skew_beta, skew_col=skew_col, group_col=group_col)
+        frames['val'] = make_balanced_eval(frames['val'], cols=(group_col, skew_col))
+        frames['test'] = make_balanced_eval(frames['test'], cols=(group_col, skew_col))
+    elif dataset == 'DogsCats':
+        # β=0(편향 주입 없음)이어도 DogsCats는 평가 프로토콜을 고정한다: val/test는 항상 (species×color) 4셀 균형.
+        # β 스윕(0, 5, 10, ...)에서 train만 달라지고 평가셋은 동일해야 acc/EO를 직접 비교할 수 있다.
+        frames['val'] = make_balanced_eval(frames['val'], cols=('species', 'color'))
+        frames['test'] = make_balanced_eval(frames['test'], cols=('species', 'color'))
 
     # 민감그룹 수를 전역(config)으로 전달 (gender=2, UTKFace race=4, drop_race 3 4 → 2)
     # len(set) 대신 max+1: drop_race로 중간 번호가 비어도(예: {0,1,3}) 그룹 id 범위가 어긋나지 않게.
@@ -210,6 +242,14 @@ def experiment(args):
               f"(실제 존재 그룹: {sorted(set(frames['train'][sensitive_group]))})")
 
     lr_schedule = [1e-4, 1e-5, 1e-6]
+    if args.no_pretrained:
+        # 무작위 초기화 학습용 스케줄. 파인튜닝용(1e-4, 13/3/3 에폭)은 스크래치에서 수렴하지 못한다
+        # (DogsCats β=5 스크래치 실측: acc 0.58). 기본 1e-3/1e-4/1e-5, 40/10/10 에폭.
+        lr_schedule = [float(x) for x in args.scratch_lrs.split(',')]
+        epoches = [int(x) for x in args.scratch_epochs.split(',')]
+        if len(lr_schedule) != len(epoches):
+            raise ValueError(f"--scratch_lrs({len(lr_schedule)}개)와 --scratch_epochs({len(epoches)}개)의 길이가 같아야 합니다.")
+        print(f"[scratch] 사전학습 없음 → 학습 스케줄 lr={lr_schedule}, epochs={epoches}")
     # 여기서 make_datasets 호출 시 shuffle=True로 되어 있음
     train_loader, test_loader = make_datasets(frames['train'], frames['val'], True, batch_size, col_used)
     dataloaders = {'train': train_loader, 'test': test_loader}
@@ -222,7 +262,7 @@ def experiment(args):
     criterion = nn.CrossEntropyLoss()
 
     torch.cuda.empty_cache()
-    best_model = make_model(network=network, n_classes=total_classes).to(device)
+    best_model = make_model(network=network, n_classes=total_classes, pretrained=not args.no_pretrained).to(device)
     best_optimizer = None  # init_train을 건너뛰면 미정의 상태로 체크포인트 복원부에 도달하므로 기본값 필요
 
     # -----------------------
@@ -845,7 +885,7 @@ if __name__ == "__main__":
     parser.add_argument('--prune_type', type=str, default='FairGRAPE', help='가지치기(Pruning) 기법의 유형')
     parser.add_argument('--loss_type', type=str, default='gender', help='분류할 목표(타겟) 태스크')
     parser.add_argument('--sensitive_group', type=str, default='gender', help='Gradient를 컨트롤할 민감 정보 그룹')
-    parser.add_argument('--init_pruned', type=float, default=0, help='이미 가지치기가 되어 있는 비율(%)')
+    parser.add_argument('--init_pruned', type=float, default=0, help='이미 가지치기가 되어 있는 비율(%%)')
     parser.add_argument('--prune_rate', type=float, default=0.9, help='최종적으로 목표하는 가지치기 비율')
     parser.add_argument('--prune_iter', type=int, default=None, help='반복적 가지치기를 수행할 횟수')
     parser.add_argument('--retrain_iter', type=int, default=3, help='각 가지치기 단계 후 재학습을 진행할 횟수')
@@ -869,7 +909,10 @@ if __name__ == "__main__":
     parser.add_argument('--save_model_iter', nargs='+', type=int, default=-1, help='특정 가지치기 iteration(또는 epoch)에 모델을 저장할지 여부')
     parser.add_argument('--skip_readable_check', action='store_true', help='dlib 기반 이미지 가독성 검사를 건너뜀')
     parser.add_argument('--race_binary', action='store_true', help='UTKFace 전용: race를 White(0) vs Non-White(1) 이진으로 병합 (Others 포함, csv/UTKFace_labels_full.csv + gender×race5 층화 분할 사용)')
-    parser.add_argument('--skew_beta', type=float, default=0, help='UTKFace race_binary 전용: FSCL식 편향 주입 비율 β (>1). train을 White m:f=β:1 / Non-White 1:β로 재표집하고 val/test는 (race×gender) 4셀 균형으로 재구성. 0이면 비활성')
+    parser.add_argument('--skew_beta', type=float, default=0, help='FSCL식 편향 주입 비율 β (>1). UTKFace(--race_binary): train을 White m:f=β:1 / Non-White 1:β로 재표집. DogsCats: cat dark:bright=β:1 / dog 1:β. val/test는 (그룹×축) 4셀 균형으로 재구성. 0이면 비활성')
+    parser.add_argument('--no_pretrained', action='store_true', help='ImageNet 사전학습 가중치 없이 무작위 초기화로 학습 (FSCL Dogs&Cats from-scratch 세팅). 결과 폴더·unpruned 모델 파일명에 _scratch 태그가 붙음')
+    parser.add_argument('--scratch_lrs', type=str, default='1e-3,1e-4,1e-5', help='--no_pretrained 전용: 단계별 학습률 (쉼표 구분)')
+    parser.add_argument('--scratch_epochs', type=str, default='40,10,10', help='--no_pretrained 전용: 단계별 에폭 수 (쉼표 구분, --scratch_lrs와 길이 동일)')
     parser.add_argument('--score_only', action='store_true', help='저장된 프루닝 체크포인트(--checkpoint)의 채널별 성능/공정성 기여도만 재계산해 channel_pruning_logs/score_only_*/에 저장하고 종료 (프루닝·재학습·모델 저장 없음)')
     parser.add_argument('--phi_analysis', action='store_true', help='impt_type=2에서 φ의 두 인자(activation gap, mean|activation grad|)를 채널별로 분리해 phi_component_analysis/에 통계·불일치 분석 로그를 저장')
     parser.add_argument('--phi_gap_only', action='store_true', help='비교 실험용: impt_type=2에서 공정성 기여도 φ로 activation gap만 사용 (activation gradient를 곱하지 않음). 로그 폴더에 gaponly 태그가 붙음')

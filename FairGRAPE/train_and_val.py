@@ -113,6 +113,7 @@ def _get_model_run_dir():
         for line in alpha_lines:
             f.write(f"{line}\n")
         f.write(f"GRL 사용       : {getattr(config, 'glo_use_grl', None)}\n")
+        f.write(f"사전학습 사용  : {getattr(config, 'glo_pretrained', True)}\n")
         f.write(f"perf_only      : {perf_only}\n")
 
     print(f"[모델 저장 폴더 생성] {run_dir} (0_run_info.txt 기록 완료)")
@@ -142,6 +143,8 @@ def _get_results_run_dir():
     tag = '_gaponly' if getattr(config, 'glo_phi_gap_only', False) else ''
     if getattr(config, 'glo_perf_only', False):
         tag += '_perfonly'  # perf-only baseline 런(--perf_only) 구분
+    if not getattr(config, 'glo_pretrained', True):
+        tag += '_scratch'  # --no_pretrained 런 구분
     if impt_type == 4:
         try:
             import prune as _p
@@ -1424,4 +1427,4 @@ def loss_multi_tasks(outputs, labels, criterion=None, output_cols_each_task=[(0,
     if find_acc:
         return loss, acc
     else:
-        return loss
+        return loss

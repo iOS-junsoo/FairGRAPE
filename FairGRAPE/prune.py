@@ -30,7 +30,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.3
+IMPT_TYPE2_ALPHA = 0.5
 IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정성 혼합 가중치. 직접 수정하면 됨.
 # impt_type=3 정규화 방식. 'rank': 블록 s내 활성 가중치의 순위 백분위(0~1) — perf/φ 분포 모양과
 # 무관하게 같은 스케일이 되어 alpha가 실제 혼합 비율로 작동. 'max': 기존 블록 max 나눗셈
@@ -38,7 +38,7 @@ IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정
 IMPT3_NORM = 'rank'
 IMPT_TYPE2_IMPORTANCE_BATCH_SIZE = 128
 # IMPT2_KEEP_PER_ITER = 0.975  # → 명령어 인자 --keep_per_iter (config.glo_keep_per_iter)로 대체됨. 이 값을 바꿔도 반영 안 됨.
-IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.08 # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 8%는 유지 (직전 floor 8% 실험과 동일 조건)
+IMPT2_MIN_KEEP_RATIO_PER_LAYER = 0.03 # impt_type=2/3: 각 레이어가 원본(채널/가중치)의 최소 8%는 유지 (직전 floor 8% 실험과 동일 조건)
 IMPT2_PROTECTION_RATIO  =0.005  # impt_type=2/3: 각 레이어에서 perf 상위 γ%를 프루닝 후보에서 제외 (보호 영역)
 # impt_type=2: 한 iter에서 층별 제거 가중치 상한 배수. None이면 비활성(기존 동작과 완전 동일).
 # cap[bn] = 배수 × remove_target × (층 bn의 후보 가중치 합 / candidate_channel_weights)
@@ -1870,8 +1870,8 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
     del masked_grads
     print("-------------compute_phi_k-------------")
 
-    if sensitive_group not in (None, 'gender', 'race'):
-        raise NotImplementedError("impt_type == 2 는 현재 gender/race 기준 민감 그룹만 지원합니다.")
+    if sensitive_group not in (None, 'gender', 'race', 'color'):
+        raise NotImplementedError("impt_type == 2 는 현재 gender/race/color 기준 민감 그룹만 지원합니다.")
 
     expected_sensitive_col = sensitive_group if sensitive_group is not None else 'gender'
     if not col_names or col_names[-1] != expected_sensitive_col:

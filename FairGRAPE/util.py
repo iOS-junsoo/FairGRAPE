@@ -46,18 +46,19 @@ def safe_forward_with_cudnn_fallback(forward_fn, *args, **kwargs):
 #    - dataset: (사용하지 않지만, 필요 시 활용 가능)
 #    - n_classes: 최종 분류 클래스 수
 # -----------------------------------------------------------------------------
-def make_model(pruning=True, network="resnet34", dataset="FairFace", n_classes=18):
+def make_model(pruning=True, network="resnet34", dataset="FairFace", n_classes=18, pretrained=True):
     """
     pretrained=True 옵션으로 사전 학습된 모델을 불러온 뒤,
     최종 분류 레이어만 n_classes에 맞게 교체합니다.
+    pretrained=False(--no_pretrained)면 ImageNet 가중치 없이 무작위 초기화 (FSCL Dogs&Cats from-scratch 세팅).
     """
     if network == "resnet34":
         # pruning 인자에 따라 로직을 분기할 수도 있음. (현재는 동일하게 동작)
-        model_conv = models.resnet34(pretrained=True) if pruning else torchvision.models.resnet34(pretrained=True)
+        model_conv = models.resnet34(pretrained=pretrained) if pruning else torchvision.models.resnet34(pretrained=pretrained)
         num_ftrs = model_conv.fc.in_features
         model_conv.fc = nn.Linear(num_ftrs, n_classes)
     elif network == 'mobilenetv2':
-        model_conv = models.mobilenet_v2(pretrained=True)
+        model_conv = models.mobilenet_v2(pretrained=pretrained)
         num_ftrs = model_conv.classifier[1].in_features
         model_conv.classifier[1] = nn.Linear(num_ftrs, n_classes)
     else:
@@ -665,7 +666,10 @@ def save_unpruned_model(model, optimizer, cfgs, scheduler=None):
     if not os.path.exists(model_dir):
         os.makedirs(model_dir, exist_ok=True)
 
-    # 파일명에 "unpruned" 표시
+    # 파일명에 "unpruned" 표시. --no_pretrained 런은 network 뒤에 _scratch 를 붙여 사전학습 런과 구분
+    import config as _cfg
+    if not getattr(_cfg, 'glo_pretrained', True):
+        network = f"{network}_scratch"
     model_path = f"{model_dir}/{dataset}_unpruned_{loss_type}_by{sensitive_group}_{network}_{exp_idx}.pt"
 
     # 같은 이름의 파일이 존재하면 exp_idx를 증가시키면서 고유 파일명 확보
@@ -686,4 +690,4 @@ def save_unpruned_model(model, optimizer, cfgs, scheduler=None):
         'scheduler_state': _to_state(scheduler)
     }, model_path)
 
-    print(f"가지치기 전 모델이 저장되었습니다: {model_path}")
+    print(f"가지치기 전 모델이 저장되었습니다: {model_path}")

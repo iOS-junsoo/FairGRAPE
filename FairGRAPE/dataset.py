@@ -175,21 +175,26 @@ def add_imbalance(frame):
 # White(race=0)는 male:female = beta:1, Non-White(race=1)는 1:beta.
 # gender 코딩은 relabel 기준 0=Male, 1=Female. 데이터 추가는 불가하므로 다수 쪽을 다운샘플한다.
 # race_binary 병합 후 프레임 전용 (race ∈ {0,1}).
-def apply_fscl_skew(train_frame, beta, seed=42, skew_col='gender'):
-    # skew_col: 인종과 상관을 주입할 축. 'gender'(태스크=race 구도, 기존 동작) 또는
-    # 'age_bin'(태스크=age 구도). White는 skew_col 0:1=β:1, Non-White는 1:β로 재표집.
+def apply_fscl_skew(train_frame, beta, seed=42, skew_col='gender', group_col='race'):
+    # group_col: 재표집 기준이 되는 이진 그룹 컬럼. UTKFace는 'race'(White/Non-White),
+    #   DogsCats는 'species'(cat=0/dog=1).
+    # skew_col: group_col과 상관을 주입할 축. UTKFace는 'gender'(태스크=race 구도) 또는
+    #   'age_bin'(태스크=age 구도), DogsCats는 'color'(dark=0/bright=1).
+    # 그룹 0은 skew_col 0:1=β:1, 그룹 1은 1:β로 재표집.
+    #   UTKFace: White m:f=β:1, Non-White 1:β
+    #   DogsCats: cat dark:bright=β:1 (검은 고양이 β배), dog 1:β (흰 개 β배) — FSCL 설정
     if beta <= 1:
         raise ValueError(f"skew 비율 beta는 1보다 커야 합니다. 현재: {beta}")
-    if not set(train_frame['race'].unique()) <= {0, 1}:
-        raise ValueError("apply_fscl_skew는 race ∈ {0,1} (race_binary) 프레임 전용입니다.")
+    if group_col not in train_frame.columns or not set(train_frame[group_col].unique()) <= {0, 1}:
+        raise ValueError(f"apply_fscl_skew의 group_col('{group_col}')은 0/1 이진 컬럼이어야 합니다.")
     if skew_col not in train_frame.columns or not set(train_frame[skew_col].unique()) <= {0, 1}:
         raise ValueError(f"apply_fscl_skew의 skew_col('{skew_col}')은 0/1 이진 컬럼이어야 합니다.")
 
     rng = np.random.RandomState(seed)
     parts = []
-    for r in sorted(train_frame['race'].unique()):
-        grp0 = train_frame[(train_frame['race'] == r) & (train_frame[skew_col] == 0)]
-        grp1 = train_frame[(train_frame['race'] == r) & (train_frame[skew_col] == 1)]
+    for r in sorted(train_frame[group_col].unique()):
+        grp0 = train_frame[(train_frame[group_col] == r) & (train_frame[skew_col] == 0)]
+        grp1 = train_frame[(train_frame[group_col] == r) & (train_frame[skew_col] == 1)]
         target = beta if r == 0 else 1.0 / beta  # 목표 skew_col 0:1 비율
         if len(grp0) > target * len(grp1):
             n_0, n_1 = int(round(target * len(grp1))), len(grp1)
@@ -197,7 +202,7 @@ def apply_fscl_skew(train_frame, beta, seed=42, skew_col='gender'):
             n_0, n_1 = len(grp0), int(round(len(grp0) / target))
         parts.append(grp0.iloc[rng.permutation(len(grp0))[:n_0]])
         parts.append(grp1.iloc[rng.permutation(len(grp1))[:n_1]])
-        print(f"[skew β={beta}] race={r}: {skew_col}=0 {len(grp0)}→{n_0}, {skew_col}=1 {len(grp1)}→{n_1} "
+        print(f"[skew β={beta}] {group_col}={r}: {skew_col}=0 {len(grp0)}→{n_0}, {skew_col}=1 {len(grp1)}→{n_1} "
               f"(0:1 = {n_0 / max(n_1, 1):.2f})")
 
     out = pd.concat(parts)
@@ -220,7 +225,9 @@ def make_balanced_eval(frame, seed=42, cols=('race', 'gender')):
 
 # csv 파일을 불러와서 new_face_dir 에 저장된 이미지와 매핑, 그리고 train/val/test로 분할
 def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=False, imbalance=False,
-               race_binary=False, stratify=False, split_csv_out=None):
+               race_binary=False, stratify=False, split_csv_out=None, strat_cols=None):
+    # strat_cols: stratify=True 시 층화 기준 컬럼 목록. None이면 기존 동작(gender × race[_orig]).
+    #   DogsCats는 ['species', 'color'] 를 넘긴다.
     frame = pd.read_csv(csv)
     frame.head()
 
@@ -228,7 +235,7 @@ def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=Fal
 
     # 라벨 컬럼 정수 dtype 보장: relabel의 .loc 대입은 object dtype으로 남을 수 있어
     # 라벨 텐서화(torch.from_numpy(np.asarray(...)))가 깨지는 것을 방지한다. 값은 불변.
-    for c in ['race', 'gender', 'age_bin', 'race_orig']:
+    for c in ['race', 'gender', 'age_bin', 'race_orig', 'species', 'color']:
         if c in frame.columns:
             frame[c] = frame[c].astype(int)
 
@@ -264,8 +271,13 @@ def make_frame(csv, new_face_dir, train_pct=0.8, seven_races=True, drop_race=Fal
         # 행 단위 분할이므로 이미지당 얼굴이 1개(행:이미지 = 1:1)인 데이터셋 전용 (UTKFace 등).
         if image_name_frame.nunique() != frame.shape[0]:
             raise ValueError("stratify=True는 이미지당 1행인 데이터셋에서만 사용할 수 있습니다.")
-        race_col = 'race_orig' if 'race_orig' in frame.columns else 'race'
-        strat_cols = [c for c in ['gender', race_col] if c in frame.columns]
+        if strat_cols is None:
+            race_col = 'race_orig' if 'race_orig' in frame.columns else 'race'
+            strat_cols = [c for c in ['gender', race_col] if c in frame.columns]
+        else:
+            missing = [c for c in strat_cols if c not in frame.columns]
+            if missing:
+                raise ValueError(f"stratify 기준 컬럼이 프레임에 없습니다: {missing}")
         rng = np.random.RandomState(42)
         split = pd.Series('train', index=frame.index)
         for _, cell_idx in sorted(frame.groupby(strat_cols).groups.items()):
@@ -514,4 +526,4 @@ def make_datasets(train_frame, val_frame, give_dataloader=True, batch_size=64, c
     if give_dataloader:
         return train_dataloader, test_dataloader
     else:
-        return transformed_train_dataset, transformed_test_dataset
+        return transformed_train_dataset, transformed_test_dataset
