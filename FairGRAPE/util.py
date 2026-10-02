@@ -407,6 +407,26 @@ def show_acc_df(fair_df, fair_df_full, col_used, sensitive_group, prune_type="Un
 #    - cfgs: (prune_type, dataset, prune_type, loss_type, sensitive_group, network, prune_rate, exp_idx)
 #    - 내부에서 model_path를 구성하고, 이미 동일 파일명이 있으면 exp_idx를 증가
 # -----------------------------------------------------------------------------
+def _beta_tag(dataset):
+    """DogsCats 또는 --skew_beta>0 런이면 '_beta<β>' (예: _beta0, _beta5), 아니면 ''. 파일명에서 β를 바로 읽기 위함."""
+    import config as _cfg
+    beta = getattr(_cfg, 'glo_skew_beta', 0) or 0
+    if dataset == 'DogsCats' or beta > 0:
+        return f"_beta{beta:g}"
+    return ''
+
+
+def _unique_path(path):
+    """같은 이름이 있으면 확장자 앞에 _1, _2, ... 를 붙여 고유 경로를 만든다."""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    n = 1
+    while os.path.exists(f"{stem}_{n}{ext}"):
+        n += 1
+    return f"{stem}_{n}{ext}"
+
+
 def save_model(best_model, cfgs):
     prune_type, dataset, prune_type, loss_type, sensitive_group, network, prune_rate, exp_idx = cfgs
 
@@ -416,12 +436,18 @@ def save_model(best_model, cfgs):
     if not os.path.exists(model_dir):
         os.makedirs(model_dir, exist_ok=True)
 
-    model_path = f"{model_dir}/{dataset}_{prune_type}_{loss_type}_by{sensitive_group}_{network}_{prune_rate}_{exp_idx}.pt"
-
-    # 같은 이름 파일이 존재하면 exp_idx를 증가시키면서 고유 파일명 확보
-    while os.path.exists(model_path):
-        exp_idx += 1
+    beta_tag = _beta_tag(dataset)
+    if beta_tag:
+        # β 런: ..._<network>[_scratch]_<prune_rate>_beta<β>.pt (exp_idx 대신 β로 구분, 중복 시 _1, _2 …)
+        import config as _cfg
+        net_tag = network if getattr(_cfg, 'glo_pretrained', True) else f"{network}_scratch"
+        model_path = _unique_path(f"{model_dir}/{dataset}_{prune_type}_{loss_type}_by{sensitive_group}_{net_tag}_{prune_rate}{beta_tag}.pt")
+    else:
         model_path = f"{model_dir}/{dataset}_{prune_type}_{loss_type}_by{sensitive_group}_{network}_{prune_rate}_{exp_idx}.pt"
+        # 같은 이름의 파일이 존재하면 exp_idx를 증가시키면서 고유 파일명 확보
+        while os.path.exists(model_path):
+            exp_idx += 1
+            model_path = f"{model_dir}/{dataset}_{prune_type}_{loss_type}_by{sensitive_group}_{network}_{prune_rate}_{exp_idx}.pt"
 
     torch.save(best_model.state_dict(), model_path)
     print(f"모델이 저장되었습니다: {model_path}")
@@ -670,12 +696,16 @@ def save_unpruned_model(model, optimizer, cfgs, scheduler=None):
     import config as _cfg
     if not getattr(_cfg, 'glo_pretrained', True):
         network = f"{network}_scratch"
-    model_path = f"{model_dir}/{dataset}_unpruned_{loss_type}_by{sensitive_group}_{network}_{exp_idx}.pt"
-
-    # 같은 이름의 파일이 존재하면 exp_idx를 증가시키면서 고유 파일명 확보
-    while os.path.exists(model_path):
-        exp_idx += 1
+    beta_tag = _beta_tag(dataset)
+    if beta_tag:
+        # β 런: ..._<network>[_scratch]_beta<β>.pt  (예: DogsCats_unpruned_species_bycolor_mobilenetv2_scratch_beta5.pt)
+        model_path = _unique_path(f"{model_dir}/{dataset}_unpruned_{loss_type}_by{sensitive_group}_{network}{beta_tag}.pt")
+    else:
         model_path = f"{model_dir}/{dataset}_unpruned_{loss_type}_by{sensitive_group}_{network}_{exp_idx}.pt"
+        # 같은 이름의 파일이 존재하면 exp_idx를 증가시키면서 고유 파일명 확보
+        while os.path.exists(model_path):
+            exp_idx += 1
+            model_path = f"{model_dir}/{dataset}_unpruned_{loss_type}_by{sensitive_group}_{network}_{exp_idx}.pt"
 
     # Optimizer, Scheduler등도 함께 저장.
     # train()은 옵티마이저 객체가 아니라 state_dict(dict)를 반환하므로 둘 다 허용한다.

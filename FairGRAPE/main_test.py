@@ -14,12 +14,40 @@ from dataset import make_frame, make_datasets, prepare_ImageNet, apply_fscl_skew
 from prune import WS, SNIP, GraSP, Lottery, FairGRAPE, Importance, Random, save_impt_df
 from util import make_model, save_model, save_output, download_dataset, show_acc_df, setseed, save_unpruned_model, print_acc_scores, safe_forward_with_cudnn_fallback, filter_readable_images_in_frames
 from train_and_val import train, loss_multi_tasks
+from prune import IMPT_TYPE2_ALPHA as DEFAULT_IMPT2_ALPHA
 
 # 가지치기(Pruning) 기법을 선택하기 위한 매핑
 pruner_map = {'WS': WS, "SNIP": SNIP, 'GraSP': GraSP, "Lottery": Lottery, "FairGRAPE": FairGRAPE, "Importance": Importance, "Random": Random}
 
 
 def experiment(args):
+    import prune
+    from channel_cap import validate_layer_remove_ratio
+    import config
+    strict_cap = validate_layer_remove_ratio(getattr(args, "impt2_layer_max_remove_ratio", None))
+    if strict_cap is not None:
+        if args.prune_type != "FairGRAPE" or args.impt != 2:
+            raise ValueError("--impt2_layer_max_remove_ratio requires FairGRAPE --impt 2")
+        if args.perf_only or prune.IMPT2_LAYER_CAP_MULTIPLIER is not None:
+            raise ValueError("Strict channel cap conflicts with perf_only or legacy cap_multiplier")
+    config.glo_impt2_layer_max_remove_ratio = strict_cap
+    if getattr(args, 'fg_mode', None) is not None:
+        if args.impt != 4 or args.prune_type != 'FairGRAPE':
+            raise ValueError('--fg_mode requires --prune_type FairGRAPE --impt 4')
+        prune.FG_ORIG_MODE = args.fg_mode
+    if args.impt == 4 and prune.FG_ORIG_MODE == 'original':
+        if args.delta_p not in (0, 1, 2):
+            raise ValueError('--fg_mode original requires --delta_p 0, 1, or 2')
+        if args.para_batch < 1 or args.stop_batch < 1:
+            raise ValueError('--fg_mode original requires positive --para_batch and --stop_batch')
+    prune.IMPT_TYPE2_ALPHA = DEFAULT_IMPT2_ALPHA
+    if args.impt2_alpha is not None:
+        if args.impt != 2 or not 0 <= args.impt2_alpha <= 1:
+            raise ValueError('--impt2_alpha requires --impt 2 and a value in [0,1]')
+        prune.IMPT_TYPE2_ALPHA = args.impt2_alpha
+    if args.dataset == 'LFWA':
+        from lfwa_experiment import run
+        return run(args)
     # -----------------------
     # (1) 명령줄 인자 로드 & 기본 설정
     # -----------------------
@@ -58,6 +86,7 @@ def experiment(args):
     config.glo_seed = seed
     config.glo_phi_analysis = args.phi_analysis  # φ 구성요소(gap/grad) 분리 분석 로그 저장 여부
     config.glo_phi_gap_only = args.phi_gap_only  # 비교 실험: 공정성 기여도로 activation gap만 사용 (gradient 미적용)
+    config.glo_skew_beta = args.skew_beta  # 모델 파일명 _beta<β> 태그용
     config.glo_pretrained = not args.no_pretrained  # 무작위 초기화 학습 여부 (결과 폴더·unpruned 파일명에 _scratch 태그)
     config.glo_perf_only = args.perf_only  # baseline 실험: φ 미사용, 성능 기여도 원시값만으로 전역 프루닝 (impt_type=2/3)
     config.glo_fg_scope = args.fg_scope  # baseline 실험 03/04: impt_type=4(원본 FairGRAPE greedy) 프루닝 대상 범위 ('blocks' | 'all')
@@ -232,6 +261,14 @@ def experiment(args):
         frames['val'] = make_balanced_eval(frames['val'], cols=('species', 'color'))
         frames['test'] = make_balanced_eval(frames['test'], cols=('species', 'color'))
 
+    if dataset == 'DogsCats':
+        # train 행 순서를 시드 고정으로 섞는다. 학습 DataLoader가 shuffle=False이고 층화 분할은 CSV 순서
+        # (cat.* 전부 → dog.* 전부)를 유지하므로, 섞지 않으면 배치의 98%가 단일 클래스가 되어
+        # 스크래치 학습이 '전부 개' 상수 예측으로 붕괴한다 (β=0 실측: acc 0.50, loss 0.693).
+        # β>0은 apply_fscl_skew가 이미 섞지만 일관성을 위해 모든 β에 적용한다 (선택된 행은 불변, 순서만 변경).
+        frames['train'] = frames['train'].sample(frac=1, random_state=seed).reset_index(drop=True)
+        print(f"[DogsCats] train {frames['train'].shape[0]}행 순서 셔플 (seed={seed})")
+
     # 민감그룹 수를 전역(config)으로 전달 (gender=2, UTKFace race=4, drop_race 3 4 → 2)
     # len(set) 대신 max+1: drop_race로 중간 번호가 비어도(예: {0,1,3}) 그룹 id 범위가 어긋나지 않게.
     # 빈 그룹은 φ/EO 집계에서 표본 0으로 자동 스킵된다.
@@ -250,7 +287,7 @@ def experiment(args):
         if len(lr_schedule) != len(epoches):
             raise ValueError(f"--scratch_lrs({len(lr_schedule)}개)와 --scratch_epochs({len(epoches)}개)의 길이가 같아야 합니다.")
         print(f"[scratch] 사전학습 없음 → 학습 스케줄 lr={lr_schedule}, epochs={epoches}")
-    # 여기서 make_datasets 호출 시 shuffle=True로 되어 있음
+    # 주의: make_datasets의 학습 DataLoader는 shuffle=False (행 순서 = 프레임 순서). DogsCats는 위에서 프레임을 직접 섞는다.
     train_loader, test_loader = make_datasets(frames['train'], frames['val'], True, batch_size, col_used)
     dataloaders = {'train': train_loader, 'test': test_loader}
 
@@ -801,7 +838,11 @@ def experiment(args):
         print("\n⭐⭐⭐[가지치기 준비] 모든 레이어 활성화")
         for name, param in best_model.named_parameters():
             if param.dtype in [torch.float32, torch.float64, torch.float16]:
-                param.requires_grad = True
+                # Upstream keeps the returned binary masks frozen in later rounds.
+                param.requires_grad = not (
+                    args.impt == 4 and prune.FG_ORIG_MODE == 'original'
+                    and name.split('.')[-1] == 'mask'
+                )
 
 
         """
@@ -845,6 +886,14 @@ def experiment(args):
     # 결과(추론) 저장
     fair_df = save_output(best_model, [dataset, prune_type, loss_type, prune_rate, frames['test'], face_dir, total_classes, network, col_used, output_cols_each_task, sensitive_group, exp_idx], csv_savedir)
 
+    if dataset == 'DogsCats' and args.impt == 4:
+        from baseline_results import save_dogscats_test_results
+        save_dogscats_test_results(
+            fair_df, best_model, args, _get_results_run_dir(),
+            mode=prune.FG_ORIG_MODE, scope=args.fg_scope,
+            target_layer_names=prune._get_fg_scope_layers(best_model, args.fg_scope),
+        )
+
     # 최종 정확도 및 그룹별 지표 출력
     if print_acc:
         show_acc_df(fair_df, full_fair_df, col_used, sensitive_group)
@@ -878,6 +927,13 @@ def experiment(args):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Parameters for pruning experiments')
+    parser.add_argument('--impt2_alpha', type=float, default=None, help='Override impt_type=2 alpha for this run; omission preserves the existing default')
+    parser.add_argument('--impt2_layer_max_remove_ratio', type=float, default=None,
+        help='impt=2: strict maximum fraction of live channels removed per block per iteration (0,1]; omitted = original behavior; never relaxes the cap')
+    parser.add_argument('--lfwa_csv', default='csv/LFWA.csv')
+    parser.add_argument('--lfwa_image_root', default='Images/LFWA')
+    parser.add_argument('--lfwa_run_dir', default=None)
+    parser.add_argument('--defer_test', action='store_true', help='LFWA: evaluate Test only after experiment selection is complete')
 
     parser.add_argument('--checkpoint', type=str, default=None, help='학습된 모델 파일(.pth)의 경로')  # 이미 학습된 모델이 있다면 해당 경로를 지정
     parser.add_argument('--dataset', type=str, default='FairFace', help='학습 및 평가에 사용할 데이터셋 이름')
@@ -922,6 +978,9 @@ if __name__ == "__main__":
         help='impt_type=4(원본 FairGRAPE greedy): 프루닝 대상 범위. blocks=features.1~17 conv만(50개 Conv2d), all=모든 Conv2d+Linear(53개). 그 외 impt_type에서는 무시됨 (baseline 실험 03/04용)')
 
 
+
+    parser.add_argument('--fg_mode', choices=['clean', 'faithful', 'original'], default=None,
+        help='impt_type=4: original=원본 참조 함수 직접 실행(torch.topk 포함), faithful=원본 점수+NumPy greedy, clean=수정된 점수+NumPy greedy. 생략하면 prune.py의 FG_ORIG_MODE 사용')
 
     args = parser.parse_args()
 

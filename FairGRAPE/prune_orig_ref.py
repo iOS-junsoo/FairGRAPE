@@ -1,7 +1,7 @@
 """원본 FairGRAPE prune.py (Bernardo1998/FairGRAPE, commit b677eb9) 대조용 사본.
 
 Activate_diff 의 impt_type=4 (FG_ORIG_MODE='faithful') 가 원본과 같은 마스크를 내는지 tests/compare_fg_orig.py 에서
-같은 환경으로 돌려 비교하기 위해 둔다. main_test 에서는 import 하지 않는다.
+같은 환경으로 돌려 비교하기 위해 둔다. --fg_mode original 실행도 fairgrape_original 어댑터를 통해 이 함수를 직접 사용한다.
 
 원본 대비 변경점 (모두 `# [REF-HOOK]` 주석으로 표시):
   - fairness_grad 가 계산한 레이어별 grad_target 을 모듈 전역 LAST_GRAD_TARGET 에 남긴다 (비교용, 동작 불변).

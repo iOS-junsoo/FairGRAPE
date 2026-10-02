@@ -77,6 +77,8 @@ def _get_model_run_dir():
             alpha_lines.append(f"보호 비율 IMPT2_PROTECTION_RATIO(γ) = {_prune.IMPT2_PROTECTION_RATIO}")
             alpha_lines.append(f"레이어 최소 유지 IMPT2_MIN_KEEP_RATIO_PER_LAYER = {_prune.IMPT2_MIN_KEEP_RATIO_PER_LAYER}")
             alpha_lines.append(f"층별 제거 상한 IMPT2_LAYER_CAP_MULTIPLIER = {_prune.IMPT2_LAYER_CAP_MULTIPLIER}")
+            if getattr(config, "glo_impt2_layer_max_remove_ratio", None) is not None:
+                alpha_lines.append(f"Strict live-channel removal ratio = {config.glo_impt2_layer_max_remove_ratio}")
         elif impt_type == 3 and perf_only:
             alpha_lines.append(f"적용 알파: 1.0 (--perf_only 강제; IMPT_TYPE3_ALPHA={_prune.IMPT_TYPE3_ALPHA} 미적용)")
             alpha_lines.append(f"정규화 방식: perf_only: 정규화 없음(raw) (IMPT3_NORM='{_prune.IMPT3_NORM}' 미적용)")
@@ -91,7 +93,7 @@ def _get_model_run_dir():
             alpha_lines.append(f"레이어 최소 유지 IMPT2_MIN_KEEP_RATIO_PER_LAYER = {_prune.IMPT2_MIN_KEEP_RATIO_PER_LAYER}")
         elif impt_type == 4:
             alpha_lines.append("적용 알파: 없음 (impt_type=4: 원본 FairGRAPE 그룹별 greedy, Bernardo1998/FairGRAPE prune.py b677eb9 재현)")
-            alpha_lines.append(f"FG_ORIG_MODE = '{_prune.FG_ORIG_MODE}' (clean: 원본 버그 Q1/Q2/Q3 수정, faithful: 원본 그대로)")
+            alpha_lines.append(f"FG_ORIG_MODE = '{_prune.FG_ORIG_MODE}' (clean: 수정 점수, faithful: 원본 점수+NumPy 선택, original: 원본 참조 함수 직접 실행)")
             alpha_lines.append(f"fg_scope = '{getattr(config, 'glo_fg_scope', 'blocks')}' (blocks: features.1~17 conv, all: 모든 Conv2d+Linear)")
             alpha_lines.append(f"para_batch = {getattr(config, 'glo_fg_para_batch', None)}, delta_p = {getattr(config, 'glo_fg_delta_p', None)}")
             alpha_lines.append("레이어별 유지율 = 1 − prune_ratio(누적) (keep_per_iter 직접 미사용)")
@@ -181,14 +183,15 @@ def train(best_model, criterion, dataloaders, learning_rates = [1e-4,1e-5,1e-6],
         print('학습 또는 재학습 iter:', epoches)
         
         # 학습 가능한 파라미터만 옵티마이저에 추가
+        candidate_model = copy.deepcopy(best_model) if cfgs and cfgs[0] == 'LFWA' else best_model
         optimizer_conv = optim.Adam(
-            filter(lambda p: p.requires_grad, best_model.parameters()), 
+            filter(lambda p: p.requires_grad, candidate_model.parameters()),
             lr=learning_rate
         )
         
         # 🔥 Debiasing 파라미터 전달
         current_model, current_acc, current_loss, current_optimizer = train_model0(
-            best_model, dataloaders, criterion, optimizer_conv, epoch, 
+            candidate_model, dataloaders, criterion, optimizer_conv, epoch,
             col_used_training, output_cols_each_task, cfgs=cfgs,
             use_debiasing=use_debiasing,
             lambda_grl=lambda_grl,
@@ -353,6 +356,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     best_loss = 100
     best_eo = float('inf')
     best_ba = 0.0
+    best_valid_eo_count, best_global_epoch = 0, 0
 
     # Attractive 클래스 개별 추적
     attractive_idx = None
@@ -374,6 +378,8 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         print(f"⚠ EO는 이진 그룹(0/1) 기준으로 계산됩니다. 현재 민감그룹 수={len(sensitive_groups)} — 그룹 2 이상은 EO에 반영되지 않습니다.")
 
     for epoch in range(num_epochs):
+        if getattr(config, 'glo_lfwa_run_dir', None):
+            config.glo_epoch_count += 1
         print('에폭 {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
 
@@ -584,7 +590,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                 mean_eo = np.mean(valid_eos)
                 print(f"전체 클래스 평균 EO: {mean_eo:.4f}")
             else:
-                mean_eo = 0.0
+                mean_eo = float("nan") if dataset == "LFWA" else 0.0
                 print("전체 클래스 평균 EO: N/A (유효 그룹 부족)")
 
             # Attractive 클래스 개별 메트릭
@@ -659,6 +665,19 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             sys.stdout = original_stdout
             output_text = output_capture.getvalue()
             output_capture.close()
+            if dataset == 'LFWA':
+                from lfwa import record_epoch
+                record_epoch({'phase': 'val' if phase == 'test' else 'train',
+                              'lr': optimizer.param_groups[0]['lr'], 'loss': epoch_loss,
+                              'accuracy': float(epoch_acc), 'ba': float(mean_ba),
+                              'eo': float(mean_eo), 'eo_valid_attributes': len(valid_eos)})
+
+            # Optional observer does not change the existing best-model rule.
+            observer = getattr(config, "glo_epoch_observer", None)
+            if phase == "test" and observer is not None:
+                observer(training_model, epoch + 1, {"accuracy": float(epoch_acc),
+                         "eo": float(mean_eo), "loss": float(epoch_loss),
+                         "ba": float(mean_ba), "text": output_text})
 
             # 🔥 Best 모델 갱신 (기존 로직 유지)
             if phase == 'test':
@@ -672,7 +691,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     if mean_eo < best_eo:
                         update_best = True
                         reason = f"정확도 동일, EO 개선 ({best_eo:.4f} → {mean_eo:.4f})"
-                    elif mean_eo == best_eo and epoch_loss < best_loss:
+                    elif (mean_eo == best_eo or (dataset == 'LFWA' and not np.isfinite(mean_eo) and not np.isfinite(best_eo))) and epoch_loss < best_loss:
                         update_best = True
                         reason = f"정확도·EO 동일, 손실 감소 ({best_loss:.4f} → {epoch_loss:.4f})"
                 
@@ -681,6 +700,9 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                     best_loss = epoch_loss
                     best_eo = mean_eo
                     best_ba = mean_ba
+                    if dataset == 'LFWA':
+                        best_valid_eo_count = len(valid_eos)
+                        best_global_epoch = config.glo_epoch_count
                     if attractive_acc_epoch is not None:
                         best_attractive_acc = attractive_acc_epoch
                         best_attractive_eo = attractive_eo_epoch
@@ -739,16 +761,20 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         masked_weight_total += w.numel()
         pruned_params += int((m == 0).sum().item())
 
-    # 프루닝 대상 전체: impt2 채널 프루닝 대상(features.1~17 conv0+conv1+conv2).
+    # impt4는 실행 시 선택한 범위, 그 외는 기존 impt2 블록 범위로 집계.
     # 해당 구조가 없는 네트워크면 마스크 관리 레이어 전체로 대체.
     try:
-        from prune import _count_all_channel_weights, _get_impt_type2_block_layer_names
+        from prune import _count_all_channel_weights, _get_impt_type2_block_layer_names, _get_fg_scope_layers
         target_layer_names = set()
-        for _bn in range(1, 18):
-            for _ln in _get_impt_type2_block_layer_names(f'features.{_bn}'):
-                if _ln is not None and _ln in modules_by_name:
-                    target_layer_names.add(_ln)
-        prune_target_total = _count_all_channel_weights(base_net)
+        if getattr(config, 'glo_impt_type', None) == 4:
+            target_layer_names.update(_get_fg_scope_layers(base_net, config.glo_fg_scope))
+            prune_target_total = sum(modules_by_name[n].weight.numel() for n in target_layer_names)
+        else:
+            for _bn in range(1, 18):
+                for _ln in _get_impt_type2_block_layer_names(f'features.{_bn}'):
+                    if _ln is not None and _ln in modules_by_name:
+                        target_layer_names.add(_ln)
+            prune_target_total = _count_all_channel_weights(base_net)
     except Exception:
         target_layer_names, prune_target_total = set(), 0
 
@@ -850,9 +876,17 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         'best_acc': float(best_acc),
         'best_eo': float(best_eo),
         'best_loss': float(best_loss),
+        **({'experiment_metadata': config.glo_experiment_metadata} if dataset == 'LFWA' else {}),
     }, best_weights_path)
 
     print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")
+
+    if dataset == 'LFWA':
+        training_model.lfwa_validation_metrics = {
+            'accuracy': float(best_acc), 'ba': float(best_ba), 'loss': float(best_loss),
+            'eo': float(best_eo) if np.isfinite(best_eo) else None,
+            'eo_valid_attributes': best_valid_eo_count, 'epoch': best_global_epoch,
+        }
 
     # 🔥 Debiasing 모드면 원래 모델 반환
     torch.backends.cudnn.enabled = prev_cudnn_enabled

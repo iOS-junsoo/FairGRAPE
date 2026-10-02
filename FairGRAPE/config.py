@@ -9,6 +9,8 @@ if hasattr(_time, 'tzset'):  # Unix 전용 (Windows에는 없음)
 
 # 전역 변수
 glo_prune_iter = 0 # 가지치기 반복 횟수
+glo_impt2_layer_max_remove_ratio = None # Optional strict live-channel cap; None = original selection.
+glo_epoch_observer = None # Optional diagnostics callback; ordinary training leaves it unset.
 glo_loss = 0
 glo_acc = 0
 # glo_optimizer = ""
@@ -27,6 +29,7 @@ glo_results_run_dir = None # retrain_epoch_results/임시 저장소/<dataset>_im
 glo_model_run_dir = None # save_models/<저장 시작 시각> 런 폴더 경로. train_and_val._get_model_run_dir()이 첫 저장 시 생성.
 glo_channel_log_run_dir = None # channel_pruning_logs/<dataset>_impt<impt>_seed<seed>_<첫 저장 시각> 런 폴더. prune._save_channel_pruning_log가 첫 저장 시 생성.
 glo_weight_log_run_dir = None # weight_pruning_logs/ 아래 동일 규칙 런 폴더 (impt_type=3). prune._save_weight_pruning_log가 첫 저장 시 생성.
+glo_skew_beta = 0 # --skew_beta 값. main_test.experiment()에서 설정. DogsCats 또는 β>0이면 unpruned/Full 모델 파일명 끝에 _beta<β> 태그.
 glo_pretrained = True # --no_pretrained 시 False. ImageNet 사전학습 없이 무작위 초기화로 학습 (FSCL Dogs&Cats 세팅 재현용). main_test.experiment()에서 설정.
 glo_perf_only = False # --perf_only: impt_type=2/3에서 φ를 쓰지 않고 성능 기여도 원시값만으로 전역 프루닝 (alpha=1, γ=0, floor=0, cap=None, 정규화 없음). main_test.experiment()에서 설정.
 glo_collapse_notes = [] # prune.py가 어떤 층/블록의 활성 채널·가중치가 0이 된 iter를 기록 ("iter N: BLOCK COLLAPSE features.K"). BEST_MODEL_SUMMARY에 그대로 적힌다.

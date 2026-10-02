@@ -22,6 +22,7 @@ import torchvision.models as models
 from train_and_val import loss_multi_tasks
 from util import make_model, custom_forward_conv2d, custom_forward_conv1d, custom_forward_linear, safe_forward_with_cudnn_fallback
 from dataset import split_image_name, make_datasets
+from channel_cap import channel_removal_limits, validate_layer_remove_ratio
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -30,7 +31,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.5
+IMPT_TYPE2_ALPHA = 0.3
 IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정성 혼합 가중치. 직접 수정하면 됨.
 # impt_type=3 정규화 방식. 'rank': 블록 s내 활성 가중치의 순위 백분위(0~1) — perf/φ 분포 모양과
 # 무관하게 같은 스케일이 되어 alpha가 실제 혼합 비율로 작동. 'max': 기존 블록 max 나눗셈
@@ -51,7 +52,8 @@ IMPT2_LAYER_CAP_MULTIPLIER = None
 IMPT2_NORM = 'max'
 # impt_type=4 (원본 FairGRAPE greedy 재현, baseline 실험 03/04) 동작 모드.
 #   'clean'   : 원본 코드의 버그 3개(Q1 zero_grad 없음, Q2 점수 계산 중 optimizer.step, Q3 마지막 그룹만 /batches)를 고친 본 실험 모드
-#   'faithful': 원본 Bernardo1998/FairGRAPE prune.py(b677eb9) 와 동일 동작. 대조 실험(tests/compare_fg_orig.py)용.
+#   'faithful': 원본 점수 계산 + NumPy greedy 이식본 (동률 선택은 원본과 다를 수 있음).
+#   'original': prune_orig_ref의 원본 점수 계산 + torch.topk greedy를 직접 실행.
 FG_ORIG_MODE = 'clean'
 FG_ORIG_BLOCK_LAYERS = None  # 런타임에 _get_fg_scope_layers() 가 채움 (마지막으로 사용한 범위 레이어 이름 리스트)
 FG_ORIG_LAST_STATS = None    # 런타임에 fg_orig_greedy_masks() 결과(레이어별 stats)를 남김. tests/compare_fg_orig.py 가 target_prop 비교에 사용
@@ -1353,6 +1355,8 @@ def _save_channel_pruning_log(
     cap_relaxed_set=None,
     cap_relaxed_removed=0,
     norm=None,
+    strict_cap_ratio=None,
+    strict_channel_limits=None,
 ):
     import datetime
     import config as _config
@@ -1408,6 +1412,12 @@ def _save_channel_pruning_log(
             f.write(f"  gamma             : {gamma:.4f}\n")
         # cap_multiplier는 비활성(None)이어도 항상 기록 — 로그 생성 코드 버전의 사후 식별용
         f.write(f"  cap_multiplier    : {cap_multiplier}\n")
+        if strict_cap_ratio is not None:
+            f.write(f"  strict_channel_cap_ratio : {strict_cap_ratio}\n")
+            f.write(f"  strict_channel_limits : {strict_channel_limits}\n")
+            f.write(f"  strict_cap_skipped : {dict(skipped_by_cap or {})}\n")
+            f.write("  strict_cap_relaxed : False\n")
+            f.write(f"  budget_deficit : {max(0, remove_target - accum_removed)}\n")
         if cap_multiplier is not None:
             f.write(f"  cap_deferred(1차 상한 스킵) : {sum((skipped_by_cap or {}).values())}\n")
             f.write(f"  cap_relaxed_channels        : {len(cap_relaxed_set or ())}\n")
@@ -1870,8 +1880,8 @@ def compute_phi_k(model, test_csv, new_img_dir=None, output_cols_each_task=[(0,7
     del masked_grads
     print("-------------compute_phi_k-------------")
 
-    if sensitive_group not in (None, 'gender', 'race', 'color'):
-        raise NotImplementedError("impt_type == 2 는 현재 gender/race/color 기준 민감 그룹만 지원합니다.")
+    if sensitive_group not in (None, 'gender', 'race', 'color', 'young'):
+        raise NotImplementedError("impt_type == 2 는 현재 gender/race/color/young 기준 민감 그룹만 지원합니다.")
 
     expected_sensitive_col = sensitive_group if sensitive_group is not None else 'gender'
     if not col_names or col_names[-1] != expected_sensitive_col:
@@ -2362,6 +2372,10 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         import config
         # --perf_only (baseline 02): φ 미사용·정규화 없음·제약 없음. 상수(IMPT2_*)는 건드리지 않고 지역변수로만 덮어쓴다.
         perf_only = bool(getattr(config, 'glo_perf_only', False))
+        strict_cap_ratio = validate_layer_remove_ratio(
+            getattr(config, "glo_impt2_layer_max_remove_ratio", None))
+        if strict_cap_ratio is not None and (perf_only or IMPT2_LAYER_CAP_MULTIPLIER is not None):
+            raise ValueError("Strict channel cap conflicts with perf_only or legacy cap_multiplier")
         if perf_only:
             if getattr(config, 'glo_phi_analysis', False) or getattr(config, 'glo_phi_gap_only', False):
                 raise ValueError("--perf_only는 φ를 계산하지 않으므로 --phi_analysis / --phi_gap_only와 함께 쓸 수 없습니다.")
@@ -2598,6 +2612,11 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             bn: int(_math.ceil(total_ch * floor_ratio))
             for bn, total_ch in per_layer_original_ch.items()
         }
+        strict_channel_limits = channel_removal_limits(
+            per_layer_original_ch,
+            {bn: count - per_layer_already_removed[bn]
+             for bn, count in per_layer_original_ch.items()},
+            per_layer_min_keep, strict_cap_ratio)
 
         # ── 전역(global) 점수 기반 채널 선택 (레이어별 최소 유지 제약 반영) ──
         selected_channels = []
@@ -2627,6 +2646,11 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                     skipped_by_floor[block_name] += 1
                     continue
 
+                if (strict_channel_limits is not None
+                        and being_removed >= strict_channel_limits[block_name]):
+                    skipped_by_cap[block_name] += 1
+                    continue
+
                 # 층별 제거 상한: 이미 상한 이상 제거한 층은 스킵하고 2차 패스 후보로 미룸.
                 # 판정은 "미달이면 허용"(마지막 채널만큼 초과 가능) — 전역 remove_target 판정과 동일 의미론.
                 # per_layer_cap은 후보가 있는 층에 반드시 키가 있음 → direct indexing (불변식 검증 겸용)
@@ -2645,7 +2669,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         cap_relaxed_set = set()
         cap_relaxed_removed = 0
         pass2_floor_blocked = defaultdict(int)
-        if per_layer_cap is not None and accum_removed < remove_target and cap_deferred:
+        if strict_cap_ratio is None and per_layer_cap is not None and accum_removed < remove_target and cap_deferred:
             for score, block_name, channel_k, weight_count in cap_deferred:
                 if accum_removed >= remove_target:
                     break
@@ -2761,6 +2785,9 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             cap_relaxed_set=cap_relaxed_set,
             cap_relaxed_removed=cap_relaxed_removed,
             norm=norm_label,
+            **({"strict_cap_ratio": strict_cap_ratio,
+                "strict_channel_limits": strict_channel_limits}
+               if strict_cap_ratio is not None else {}),
         )
 
         # 최종 마스크 리스트 반환 (layer 순서 유지)
@@ -2786,25 +2813,43 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         print(f"impt_type == 4: 원본 FairGRAPE greedy → mode={mode}, scope={scope}, prune_ratio={prune_ratio:.4f}, "
               f"para_batch={para_batch}, delta_p={delta_p_int}, stop_batch={stop_batch}")
 
-        t0 = time.perf_counter()
-        H = fg_orig_importance_by_group(model, test_csv, new_img_dir, output_cols_each_task, col_names, stop_batch, mode,
-                                        masked_grads=masked_grads)
-        t1 = time.perf_counter()
         scope_layers = _get_fg_scope_layers(model, scope)
+        if not scope_layers:
+            raise ValueError(f"fg_scope={scope!r}에 해당하는 레이어가 없습니다. 이 네트워크에는 --fg_scope all을 사용하세요.")
         global FG_ORIG_BLOCK_LAYERS
         FG_ORIG_BLOCK_LAYERS = list(scope_layers)
-        masks, stats = fg_orig_greedy_masks(model, H, prune_ratio, scope_layers, para_batch, delta_p_int)
-        t2 = time.perf_counter()
+        t0 = time.perf_counter()
+        if mode == 'original':
+            if delta_p != delta_p_int:
+                raise ValueError('original 모드의 delta_p는 정확히 0/1/2여야 합니다.')
+            from fairgrape_original import original_fairgrape_masks
+            # Use the upstream function for both scores and torch.topk selection.
+            # The local dataset, loss, and retraining protocol remain shared.
+            with torch.backends.cudnn.flags(enabled=False):
+                masks, stats = original_fairgrape_masks(
+                    model, prune_ratio, test_csv, new_img_dir, sensitive_classes,
+                    masked_grads, output_cols_each_task, col_names, para_batch,
+                    stop_batch, delta_p_int, scope_layers,
+                )
+            t_score = t_greedy = None  # Upstream exposes one combined call.
+        else:
+            with torch.backends.cudnn.flags(enabled=False):
+                H = fg_orig_importance_by_group(model, test_csv, new_img_dir, output_cols_each_task, col_names, stop_batch, mode,
+                                                masked_grads=masked_grads)
+            t1 = time.perf_counter()
+            masks, stats = fg_orig_greedy_masks(model, H, prune_ratio, scope_layers, para_batch, delta_p_int)
+            t_score, t_greedy = t1 - t0, time.perf_counter() - t1
+        t_total = time.perf_counter() - t0
         global FG_ORIG_LAST_STATS
         FG_ORIG_LAST_STATS = stats
         n_scope = sum(1 for st in stats if st['in_scope'])
         kept_scope = sum(st['kept'] for st in stats if st['in_scope'])
         numel_scope = sum(st['numel'] for st in stats if st['in_scope'])
         print(f"impt_type == 4 greedy 완료: 범위 {n_scope} 레이어, 유지 {kept_scope}/{numel_scope} "
-              f"({kept_scope / max(numel_scope, 1):.4f}), 점수 {t1 - t0:.1f}s, greedy {t2 - t1:.1f}s")
+              f"({kept_scope / max(numel_scope, 1):.4f}), 총 {t_total:.1f}s")
         _save_fg_orig_pruning_log(stats, prune_ratio, config.glo_prune_iter, mode, scope,
-                                  t_score=t1 - t0, t_greedy=t2 - t1, model=model,
-                                  para_batch=para_batch, delta_p=delta_p_int)
+                                  t_score=t_score, t_greedy=t_greedy, model=model,
+                                  para_batch=para_batch, delta_p=delta_p_int, t_total=t_total)
         return masks
 
     if impt_type == 3:
@@ -3191,7 +3236,8 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 #   - 선택: fg_orig_greedy_masks         ← 원본 fairness_grad 의 greedy 부분 (L481-580) + make_mask_by_grad (L761-769)
 #   - FG_ORIG_MODE='clean'  : 원본 코드의 버그 3개(Q1 zero_grad 부재, Q2 점수 계산 중 optimizer.step,
 #                             Q3 마지막 그룹만 batches로 나눔)를 고친 본 실험 모드
-#   - FG_ORIG_MODE='faithful': 원본 코드와 비트 수준으로 같은 동작(Q1·Q2·Q3 포함). 대조용.
+#   - FG_ORIG_MODE='faithful': 원본 점수(Q1·Q2·Q3 포함) + NumPy greedy. 동률 선택은 원본과 다를 수 있음.
+#   - FG_ORIG_MODE='original': 원본 참조 함수를 직접 실행 (아래 NumPy greedy는 사용하지 않음).
 #   설계 문서: docs/.../03_fairgrape_orig_blocks.md §3, §4
 # ═══════════════════════════════════════════════════════════════════════════════
 def fg_orig_importance_by_group(model, test_csv, new_img_dir=None, output_cols_each_task=[(0, 2)],
@@ -3433,7 +3479,7 @@ def fg_orig_greedy_masks(model, H_each_group, prune_ratio, scope_layers, para_ba
 
 
 def _save_fg_orig_pruning_log(stats, prune_ratio, prune_iter, mode, scope, t_score=None, t_greedy=None, model=None,
-                              para_batch=None, delta_p=None, log_dir='fg_orig_pruning_logs'):
+                              para_batch=None, delta_p=None, log_dir='fg_orig_pruning_logs', t_total=None):
     """impt_type=4 로그: fg_orig_pruning_logs/<dataset>_impt4_seed<seed>_<mode>_<scope>_<시각>/iterNN.txt"""
     import datetime
     import config as _config
@@ -3461,6 +3507,10 @@ def _save_fg_orig_pruning_log(stats, prune_ratio, prune_iter, mode, scope, t_sco
         f.write(f"  para_batch   : {para_batch}\n")
         f.write(f"  delta_p      : {delta_p}\n")
         f.write(f"  timestamp    : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        if t_total is not None:
+            f.write(f"  t_total      : {t_total:.1f}s (점수 계산 + greedy 선택)\n")
+        if mode == 'original':
+            f.write("  implementation: prune_orig_ref, upstream b677eb9; selected_prop/picks는 원본에서 제공하지 않음\n")
         if t_score is not None:
             f.write(f"  t_score      : {t_score:.1f}s (그룹별 점수 pass)\n")
         if t_greedy is not None:
