@@ -173,6 +173,9 @@ def train(best_model, criterion, dataloaders, learning_rates = [1e-4,1e-5,1e-6],
           lambda_grl=1.0,       # 🔥 GRL lambda
           lambda_gender=0.1):   # 🔥 Gender loss weight
     
+    import config
+    single_task = getattr(config, 'glo_impt_type', None) in (5, 6, 7)
+    best_single_metrics = None
     best_acc, best_loss = 0, 100
     best_optimizer = None
 
@@ -183,7 +186,7 @@ def train(best_model, criterion, dataloaders, learning_rates = [1e-4,1e-5,1e-6],
         print('학습 또는 재학습 iter:', epoches)
         
         # 학습 가능한 파라미터만 옵티마이저에 추가
-        candidate_model = copy.deepcopy(best_model) if cfgs and cfgs[0] == 'LFWA' else best_model
+        candidate_model = copy.deepcopy(best_model) if single_task or (cfgs and cfgs[0] == 'LFWA') else best_model
         optimizer_conv = optim.Adam(
             filter(lambda p: p.requires_grad, candidate_model.parameters()),
             lr=learning_rate
@@ -198,7 +201,15 @@ def train(best_model, criterion, dataloaders, learning_rates = [1e-4,1e-5,1e-6],
             lambda_gender=lambda_gender
         )
 
-        if current_acc > best_acc or (current_acc == best_acc and current_loss < best_loss):
+        if single_task:
+            from celeba_single import selection_key
+            candidate_metrics = current_model.single_validation_metrics
+            improved = best_single_metrics is None or selection_key(candidate_metrics) > selection_key(best_single_metrics)
+        else:
+            improved = current_acc > best_acc or (current_acc == best_acc and current_loss < best_loss)
+        if improved:
+            if single_task:
+                best_single_metrics = dict(candidate_metrics)
             best_acc = current_acc
             best_loss = current_loss
             best_model = current_model
@@ -254,6 +265,10 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                  lambda_grl=1.0,       # 🔥 GRL lambda
                  lambda_gender=0.1):   # 🔥 Gender loss weight
 
+    import config
+    single_task = getattr(config, 'glo_impt_type', None) in (5, 6, 7)
+    single_tag = (f"impt{config.glo_impt_type}_{config.glo_experiment_metadata['targets'][0]}_official_{config.glo_train_stage}_val_"
+                  if single_task else '')
     if cfgs is None:
         raise ValueError("train_model0에는 실험 설정 cfgs가 필요합니다.")
 
@@ -267,7 +282,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
          sensitive_group, exp_idx) = cfgs
         seed = None
 
-    device = torch.device('cuda:0')
+    device = next(model.parameters()).device if single_task else torch.device('cuda:0')
     prev_cudnn_enabled = torch.backends.cudnn.enabled
     prev_cudnn_benchmark = torch.backends.cudnn.benchmark
     torch.backends.cudnn.enabled = False
@@ -357,6 +372,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     best_eo = float('inf')
     best_ba = 0.0
     best_valid_eo_count, best_global_epoch = 0, 0
+    best_single_metrics = None
 
     # Attractive 클래스 개별 추적
     attractive_idx = None
@@ -378,6 +394,8 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         print(f"⚠ EO는 이진 그룹(0/1) 기준으로 계산됩니다. 현재 민감그룹 수={len(sensitive_groups)} — 그룹 2 이상은 EO에 반영되지 않습니다.")
 
     for epoch in range(num_epochs):
+        if single_task:
+            config.glo_single_epoch += 1
         if getattr(config, 'glo_lfwa_run_dir', None):
             config.glo_epoch_count += 1
         print('에폭 {}/{}'.format(epoch, num_epochs - 1))
@@ -536,6 +554,9 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
             else:
                  print(f"\n📊 Loss 분석 ({phase}):")
                  print(f"  Total Loss:  {epoch_loss:.4f}")
+            if single_task:
+                total_epoch_loss = epoch_loss
+                epoch_loss = epoch_task_loss if use_debiasing else epoch_loss
             # 🔥 BA & EO 계산 (기존 로직 유지)
             all_ba_means = []
             all_eos = []
@@ -590,7 +611,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                 mean_eo = np.mean(valid_eos)
                 print(f"전체 클래스 평균 EO: {mean_eo:.4f}")
             else:
-                mean_eo = float("nan") if dataset == "LFWA" else 0.0
+                mean_eo = float("nan") if dataset == "LFWA" or single_task else 0.0
                 print("전체 클래스 평균 EO: N/A (유효 그룹 부족)")
 
             # Attractive 클래스 개별 메트릭
@@ -672,6 +693,14 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                               'accuracy': float(epoch_acc), 'ba': float(mean_ba),
                               'eo': float(mean_eo), 'eo_valid_attributes': len(valid_eos)})
 
+            if single_task:
+                from celeba_single import metrics_from_counts
+                from celeba_single_reporting import record_epoch
+                phase_metrics = metrics_from_counts(eqodds_stats[0], epoch_loss)
+                record_epoch(phase_metrics, phase=phase, lr=optimizer.param_groups[0]['lr'],
+                             total_loss=total_epoch_loss,
+                             auxiliary_loss=epoch_gender_loss if use_debiasing else 0.0)
+
             # Optional observer does not change the existing best-model rule.
             observer = getattr(config, "glo_epoch_observer", None)
             if phase == "test" and observer is not None:
@@ -695,6 +724,12 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
                         update_best = True
                         reason = f"정확도·EO 동일, 손실 감소 ({best_loss:.4f} → {epoch_loss:.4f})"
                 
+                if single_task:
+                    from celeba_single import selection_key
+                    update_best = best_single_metrics is None or selection_key(phase_metrics) > selection_key(best_single_metrics)
+                    if update_best:
+                        best_single_metrics = dict(phase_metrics)
+                        reason = '선택 속성 Validation Accuracy / EO / task Loss 개선'
                 if update_best:
                     best_acc = epoch_acc
                     best_loss = epoch_loss
@@ -717,11 +752,11 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
 
             import config
            
-            if phase == 'test':
+            if phase == 'test' and not single_task:
                 #! 결과 저장
                 save_dir = _get_results_run_dir()
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"Total_info_prune: {config.glo_prune_iter + 1}_retrain: {epoch + 1}_output_{timestamp}.txt"
+                filename = f"{single_tag}Total_info_prune: {config.glo_prune_iter + 1}_retrain: {epoch + 1}_output_{timestamp}.txt"
                 file_path = os.path.join(save_dir, filename)
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(output_text)
@@ -766,7 +801,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     try:
         from prune import _count_all_channel_weights, _get_impt_type2_block_layer_names, _get_fg_scope_layers
         target_layer_names = set()
-        if getattr(config, 'glo_impt_type', None) == 4:
+        if getattr(config, 'glo_impt_type', None) in (4, 6):
             target_layer_names.update(_get_fg_scope_layers(base_net, config.glo_fg_scope))
             prune_target_total = sum(modules_by_name[n].weight.numel() for n in target_layer_names)
         else:
@@ -795,6 +830,14 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     print(f"✂️ 프루닝 통계(실제 마스크 기준): 전체 대비 {pruned_params:,}/{total_params:,} = {pruned_pct_total:.2f}%, "
           f"대상 대비 {pruned_in_target:,}/{prune_target_total:,} = {pruned_pct_target:.2f}%")
 
+    if single_task:
+        # The runner writes one summary/checkpoint for the winner across all LR segments.
+        torch.backends.cudnn.enabled = prev_cudnn_enabled
+        torch.backends.cudnn.benchmark = prev_cudnn_benchmark
+        base = training_model.get_base_model() if use_debiasing else training_model
+        base.single_validation_metrics = best_single_metrics
+        return base, best_acc, best_loss, best_optimizer_state
+
     # 🔥 베스트 모델 최종 결과 저장
     import config
     save_dir = _get_results_run_dir()
@@ -804,7 +847,7 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     use_grl = getattr(config, 'glo_use_grl', use_debiasing)
     
     # 베스트 모델 요약 파일 생성
-    best_model_filename = f"BEST_MODEL_SUMMARY_prune_{config.glo_prune_iter + 1}_{timestamp}.txt"
+    best_model_filename = f"{single_tag}BEST_MODEL_SUMMARY_prune_{config.glo_prune_iter + 1}_{timestamp}.txt"
     best_model_path = os.path.join(save_dir, best_model_filename)
     
     with open(best_model_path, "w", encoding="utf-8") as f:
@@ -821,12 +864,14 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
         _perf_only = bool(getattr(config, 'glo_perf_only', False))
         try:
             import prune as _prune
-            _norm = {2: _prune.IMPT2_NORM, 3: _prune.IMPT3_NORM}.get(_impt_type)
+            _norm = {2: _prune.IMPT2_NORM, 3: _prune.IMPT3_NORM, 5: _prune.IMPT2_NORM}.get(_impt_type)
         except Exception:  # noqa: BLE001
             _norm = None
-        if _perf_only and _impt_type in (2, 3):
+        if _perf_only and _impt_type in (2, 3, 5):
             _norm = 'raw'  # --perf_only: 정규화 없음
         f.write(f"Impt Type: {_impt_type}\n")
+        if single_task:
+            f.write(f"Target: {col_used_training[0]} | Split: official Validation\n")
         f.write(f"Norm: {_norm if _norm is not None else '해당 없음'}\n")
         f.write(f"Perf Only: {_perf_only}\n")
         f.write(f"GRL Enabled: {use_grl}\n")
@@ -866,20 +911,22 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     best_weights_filename = f"BEST_MODEL_prune_{config.glo_prune_iter + 1:02d}_acc_{best_acc:.4f}_eo_{best_eo:.4f}_{timestamp}.pt"
     best_weights_path = os.path.join(best_model_weights_dir, best_weights_filename)
 
-    torch.save({
-        'model_state_dict': best_model_wts,  # GRL 사용 시 Wrapper 포함 (base_model.* 키)
-        'optimizer_state_dict': best_optimizer_state,
-        'grl_enabled': use_grl,
-        'alpha': alpha,
-        'seed': seed,
-        'prune_iteration': config.glo_prune_iter + 1,
-        'best_acc': float(best_acc),
-        'best_eo': float(best_eo),
-        'best_loss': float(best_loss),
-        **({'experiment_metadata': config.glo_experiment_metadata} if dataset == 'LFWA' else {}),
-    }, best_weights_path)
+    # impt=5 saves only validated base-model checkpoints in its runner.
+    if not single_task:
+        torch.save({
+            'model_state_dict': best_model_wts,  # GRL 사용 시 Wrapper 포함 (base_model.* 키)
+            'optimizer_state_dict': best_optimizer_state,
+            'grl_enabled': use_grl,
+            'alpha': alpha,
+            'seed': seed,
+            'prune_iteration': config.glo_prune_iter + 1,
+            'best_acc': float(best_acc),
+            'best_eo': float(best_eo),
+            'best_loss': float(best_loss),
+            **({'experiment_metadata': config.glo_experiment_metadata} if dataset == 'LFWA' or single_task else {}),
+        }, best_weights_path)
 
-    print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")
+        print(f"🏆 [베스트 모델 가중치 저장] {best_weights_path}\n")
 
     if dataset == 'LFWA':
         training_model.lfwa_validation_metrics = {
@@ -892,6 +939,9 @@ def train_model0(model, dataloaders, criterion, optimizer, num_epochs=25,
     torch.backends.cudnn.enabled = prev_cudnn_enabled
     torch.backends.cudnn.benchmark = prev_cudnn_benchmark
 
+    if single_task:
+        base = training_model.get_base_model() if use_debiasing else training_model
+        base.single_validation_metrics = best_single_metrics
     if use_debiasing:
         final_model = training_model.get_base_model()
         print("\n✅ Debiased 모델에서 Base 모델 추출 완료")

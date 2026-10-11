@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-02",
+  "tests": {
+    "passed": 39,
+    "skipped": 1,
+    "skip_reason": "Optional pre-change selector source not configured"
+  },
+  "full_data_check": {
+    "split_sizes": {
+      "train": 162770,
+      "val": 19867,
+      "test": 19962
+    },
+    "partition_sha256": "fc955bcb3ef8fbdf7d5640d9a8693a8431b5f2ee291a5c1449a1549e7e073fe7",
+    "csv_join_and_all_image_paths_verified": true,
+    "all_images_decoded": false
+  },
+  "gpu_smoke": {
+    "device": "NVIDIA RTX PRO 4500 Blackwell",
+    "attribute": "Smiling",
+    "samples_per_official_split": 4,
+    "imagenet_initialization": true,
+    "dense_finetune_epochs": 1,
+    "pruning_iterations": 1,
+    "retrain_epochs_per_stage": 1,
+    "grl_on_and_off": true,
+    "dense_reload_no_retraining": true,
+    "pruned_score_only": true,
+    "final_evaluation_only": true
+  },
+  "limitations": [
+    "No full-scale training or accuracy experiment was performed.",
+    "Smoke checkpoints cannot initialize a full-data run."
+  ]
+}

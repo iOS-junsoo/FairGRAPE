@@ -31,7 +31,7 @@ supported_layers = ['Linear', 'Conv2d', 'Conv1d']
 # impt_type == 1에서 사용할 성능-공정성 혼합 가중치.
 # 사용자가 파일을 직접 열어 여기 값을 수정하면 됩니다.
 IMPT_TYPE1_ALPHA = 0.0
-IMPT_TYPE2_ALPHA = 0.3
+IMPT_TYPE2_ALPHA = 0.5
 IMPT_TYPE3_ALPHA = 0.6  # impt_type=3(가중치 단위 pruning)의 성능-공정성 혼합 가중치. 직접 수정하면 됨.
 # impt_type=3 정규화 방식. 'rank': 블록 s내 활성 가중치의 순위 백분위(0~1) — perf/φ 분포 모양과
 # 무관하게 같은 스케일이 되어 alpha가 실제 혼합 비율로 작동. 'max': 기존 블록 max 나눗셈
@@ -531,12 +531,12 @@ class FairGRAPE(Prunner):
         print("sensitive_group:", sensitive_group)
         print("stop_batch:", stop_batch)
         
-        if impt_type == 2:
+        if impt_type in (2, 5):
             print("alpha:", IMPT_TYPE2_ALPHA, "| gamma:", IMPT2_PROTECTION_RATIO)
         elif impt_type == 3:
             print("alpha:", IMPT_TYPE3_ALPHA, "| gamma:", IMPT2_PROTECTION_RATIO)
-        elif impt_type == 4:
-            print("FG_ORIG_MODE:", FG_ORIG_MODE, "| para_batch:", para_batch, "| delta_p:", delta_p)
+        elif impt_type in (4, 6):
+            print("FG_ORIG_MODE:", 'original' if impt_type == 6 else FG_ORIG_MODE, "| para_batch:", para_batch, "| delta_p:", delta_p)
         else:
             print("alpha:", IMPT_TYPE1_ALPHA)
 
@@ -1316,8 +1316,8 @@ def _get_pruning_log_run_dir(base_dir, cache_attr):
     if getattr(_config, 'glo_perf_only', False):
         tag += '_perfonly'
     # impt_type=4(원본 FairGRAPE greedy) 런은 모드(clean/faithful)와 범위(blocks/all)를 폴더명에 기록
-    if impt == 4:
-        tag += f"_{FG_ORIG_MODE}_{getattr(_config, 'glo_fg_scope', 'blocks')}"
+    if impt in (4, 6):
+        tag += '_original_all' if impt == 6 else f"_{FG_ORIG_MODE}_{getattr(_config, 'glo_fg_scope', 'blocks')}"
     run_dir = os.path.join(base_dir, f"{ds}_impt{impt}_seed{seed}{tag}_{stamp}")
     os.makedirs(run_dir, exist_ok=True)
     setattr(_config, cache_attr, run_dir)
@@ -1400,6 +1400,9 @@ def _save_channel_pruning_log(
         f.write(f"Channel Pruning Log\n")
         f.write(f"  dataset    : {getattr(_config, 'glo_dataset', None)}\n")
         f.write(f"  impt_type  : {getattr(_config, 'glo_impt_type', None)}\n")
+        if getattr(_config, "glo_impt_type", None) == 5:
+            f.write(f"  target     : {_config.glo_experiment_metadata['targets'][0]}\n")
+            f.write("  split      : official Train\n")
         f.write(f"  seed       : {getattr(_config, 'glo_seed', None)}\n")
         f.write(f"  iteration  : {prune_iter + 1}\n")
         f.write(f"  alpha      : {alpha:.4f}\n")
@@ -2364,9 +2367,16 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         print_score_summary(combined_score, "alpha-weighted combined")
         return build_mask_list(combined_score, keep_ratio, keep_largest_scores=True)
 
-    if impt_type == 2:
-        if sensitive_classes != 78:
-            print(f"impt_type == 2 참고: 현재 sensitive_classes={sensitive_classes}, CelebA multi-task 기준 78로 전달되는 구성을 가정합니다.")
+    if impt_type in (2, 5):
+        if impt_type == 5:
+            if (list(output_cols_each_task) != [(0, 2)] or len(col_names) != 2
+                    or col_names[0] == col_names[1] or network != 'mobilenetv2'):
+                raise ValueError('impt=5 requires one binary task and one sensitive label')
+            head = dict(model.named_modules()).get('classifier.1')
+            if head is None or head.out_features != 2:
+                raise ValueError('impt=5 requires a two-output classifier')
+        if impt_type == 2 and sensitive_classes != 78:
+            print(f"impt_type == {impt_type} 참고: 현재 sensitive_classes={sensitive_classes}, CelebA multi-task 기준 78로 전달되는 구성을 가정합니다.")
         
         alpha = float(IMPT_TYPE2_ALPHA)
         import config
@@ -2383,7 +2393,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             gamma = 0.0
             floor_ratio = 0.0
             cap_multiplier = None
-            print("impt_type == 2: --perf_only → alpha=1.0, gamma=0, floor=0, cap=None (성능 기여도만, φ 생략)")
+            print(f"impt_type == {impt_type}: --perf_only → alpha=1.0, gamma=0, floor=0, cap=None (성능 기여도만, φ 생략)")
         else:
             gamma = float(IMPT2_PROTECTION_RATIO)
             floor_ratio = float(IMPT2_MIN_KEEP_RATIO_PER_LAYER)
@@ -2391,7 +2401,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         norm_label = 'raw' if perf_only else IMPT2_NORM
         config.glo_imp_rate = alpha  # run_info·로그 파일명용 (perf_only면 1.0)
         if not 0.0 <= alpha <= 1.0:
-            raise ValueError(f"impt_type == 2 의 alpha는 0과 1 사이여야 합니다. 현재 값: {alpha}")
+            raise ValueError(f"impt_type == {impt_type} 의 alpha는 0과 1 사이여야 합니다. 현재 값: {alpha}")
 
         # iter당 유지율: CLI --keep_per_iter (config.glo_keep_per_iter)로 전달됨.
         # main_test 경유 시 항상 CLI 값이 설정되므로, 아래 폴백(0.975)은 직접 호출 시에만 쓰인다.
@@ -2400,7 +2410,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         if not 0.0 < keep_per_iter <= 1.0:
             raise ValueError(f"keep_per_iter는 0 초과 1 이하여야 합니다. 현재: {keep_per_iter}")
 
-        print(f"impt_type == 2: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={norm_label}로 채널 단위 fairness-aware pruning 시작")
+        print(f"impt_type == {impt_type}: alpha={alpha:.4f}, keep_per_iter={keep_per_iter:.4f}, norm={norm_label}로 채널 단위 fairness-aware pruning 시작")
 
         if perf_only:
             # φ 계산 생략: perf_by_layer와 같은 키 집합(features.1 conv.0.0, features.N.conv.1.0, features.18.0)을
@@ -2426,7 +2436,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
 
         # 비교 실험(--phi_gap_only): 공정성 기여도로 gradient를 곱하기 전의 activation gap만 사용
         if getattr(config, 'glo_phi_gap_only', False):
-            print("impt_type == 2: --phi_gap_only 활성 — φ로 activation gap만 사용 (activation gradient 미적용)")
+            print(f"impt_type == {impt_type}: --phi_gap_only 활성 — φ로 activation gap만 사용 (activation gradient 미적용)")
             phi_by_layer = {name: gap.to(torch.float32) for name, gap in gap_by_layer.items()}
 
         if torch.cuda.is_available():
@@ -2493,7 +2503,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                 f"현재: {cap_multiplier}"
             )
 
-        print(f"impt_type == 2: protection_ratio (γ)={gamma:.4f} 적용 — 각 레이어 perf 상위 γ% 보호")
+        print(f"impt_type == {impt_type}: protection_ratio (γ)={gamma:.4f} 적용 — 각 레이어 perf 상위 γ% 보호")
         protected_set, protected_per_layer, active_per_layer = _compute_protected_channels(
             model, perf_by_layer, gamma
         )
@@ -2554,7 +2564,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
                 score_by_channel.append((combined_scores[channel_k].item(), block_name, channel_k, weight_count))
 
         if not score_by_channel:
-            print("impt_type == 2: 제거 가능한 채널 점수를 만들지 못해 기존 마스크를 그대로 반환합니다.")
+            print(f"impt_type == {impt_type}: 제거 가능한 채널 점수를 만들지 못해 기존 마스크를 그대로 반환합니다.")
             return _build_channel_mask_list(model, [], device)
 
         # ── remove_target: 전체 활성 가중치(보호 포함)의 일정 비율 제거 ──
@@ -2570,7 +2580,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         remove_target = int(round(total_active_channel_weights * (1.0 - keep_per_iter)))
 
         print(
-            f"impt_type == 2 제거량 계산: total_active={total_active_channel_weights} "
+            f"impt_type == {impt_type} 제거량 계산: total_active={total_active_channel_weights} "
             f"(candidate={candidate_channel_weights}, protected={protected_channel_weights}), "
             f"keep_per_iter={keep_per_iter}, remove_target={remove_target}, "
             f"candidates={len(score_by_channel)}"
@@ -2716,7 +2726,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
             print(f"  [Global 선택] layer={bn}, selected={layer_select_count[bn]}")
 
         print(
-            f"impt_type == 2 채널 선택 완료: selected={len(selected_channels)}, "
+            f"impt_type == {impt_type} 채널 선택 완료: selected={len(selected_channels)}, "
             f"estimated_removed={accum_removed}, remove_target={remove_target}"
         )
 
@@ -2794,23 +2804,31 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         final_mask_list = [mask_by_name[name].to(device) for name in layer_order if name in mask_by_name]
         return final_mask_list
 
-    if impt_type == 4:
-        # ── impt_type == 4: 원본 FairGRAPE(Bernardo1998) 가중치 단위 greedy 재현 (baseline 실험 03/04) ──
+    if impt_type in (4, 6):
+        # ── impt_type 4/6: 원본 FairGRAPE 가중치 단위 greedy (6은 단일 속성 original/all 전용) ──
         #   점수: 그룹 g 표본만의 손실로 (|W|·|∂L_g/∂W|)² 를 배치 누적 → 레이어별 그룹 점유율 target
         #   선택: 레이어마다 "선택된 가중치의 그룹별 점유율이 target 과 같아지도록" 가장 부족한 그룹의 상위 가중치부터
         #         int(numel × (1 − prune_ratio)) 개 유지 (prune_ratio = 누적 비율; keep_per_iter 를 직접 쓰지 않음)
         import config
-        mode = str(FG_ORIG_MODE)
-        scope = str(getattr(config, 'glo_fg_scope', 'blocks'))
+        mode = 'original' if impt_type == 6 else str(FG_ORIG_MODE)
+        scope = 'all' if impt_type == 6 else str(getattr(config, 'glo_fg_scope', 'blocks'))
+        if impt_type == 6:
+            if (network != 'mobilenetv2' or sensitive_classes != 2
+                    or list(map(tuple, output_cols_each_task)) != [(0, 2)]
+                    or len(col_names) != 2 or col_names[-1] != 'gender'
+                    or sensitive_group != 'gender' or col_names[0] == 'gender'):
+                raise ValueError('impt=6 requires MobileNetV2, one binary task and gender groups')
+            if delta_p not in (0, 1, 2) or para_batch < 1 or stop_batch < 1:
+                raise ValueError('impt=6 requires delta_p in {0,1,2} and positive para_batch/stop_batch')
         delta_p_int = int(delta_p)
         if delta_p_int not in (0, 1, 2):
-            raise ValueError(f"impt_type == 4 의 delta_p 는 0/1/2 만 허용됩니다 (원본 기본값 0). 현재: {delta_p}")
+            raise ValueError(f"impt_type == {impt_type} 의 delta_p 는 0/1/2 만 허용됩니다 (원본 기본값 0). 현재: {delta_p}")
         if delta_p_int != 0:
-            print(f"경고: impt_type == 4 원본 기본값은 delta_p=0 입니다. 현재 delta_p={delta_p_int} (원본 옵션 {delta_p_int} 경로로 진행)")
+            print(f"경고: impt_type == {impt_type} 원본 기본값은 delta_p=0 입니다. 현재 delta_p={delta_p_int} (원본 옵션 {delta_p_int} 경로로 진행)")
         if float(delta_p) != float(delta_p_int):
             print(f"경고: --delta_p {delta_p} 를 int({delta_p_int}) 로 해석했습니다 (Activate_diff 기본값 0.5 ≠ 원본 0)")
-        config.glo_imp_rate = float('nan')  # α 개념 없음 → run_info 에는 FG_ORIG_MODE 로 기록
-        print(f"impt_type == 4: 원본 FairGRAPE greedy → mode={mode}, scope={scope}, prune_ratio={prune_ratio:.4f}, "
+        config.glo_imp_rate = None if impt_type == 6 else float('nan')  # 원본에는 alpha 없음
+        print(f"impt_type == {impt_type}: 원본 FairGRAPE greedy → mode={mode}, scope={scope}, prune_ratio={prune_ratio:.4f}, "
               f"para_batch={para_batch}, delta_p={delta_p_int}, stop_batch={stop_batch}")
 
         scope_layers = _get_fg_scope_layers(model, scope)
@@ -2845,7 +2863,7 @@ def fairness_grad(model, prune_ratio, test_csv, new_img_dir=None, sensitive_clas
         n_scope = sum(1 for st in stats if st['in_scope'])
         kept_scope = sum(st['kept'] for st in stats if st['in_scope'])
         numel_scope = sum(st['numel'] for st in stats if st['in_scope'])
-        print(f"impt_type == 4 greedy 완료: 범위 {n_scope} 레이어, 유지 {kept_scope}/{numel_scope} "
+        print(f"impt_type == {impt_type} greedy 완료: 범위 {n_scope} 레이어, 유지 {kept_scope}/{numel_scope} "
               f"({kept_scope / max(numel_scope, 1):.4f}), 총 {t_total:.1f}s")
         _save_fg_orig_pruning_log(stats, prune_ratio, config.glo_prune_iter, mode, scope,
                                   t_score=t_score, t_greedy=t_greedy, model=model,
@@ -3497,7 +3515,9 @@ def _save_fg_orig_pruning_log(stats, prune_ratio, prune_iter, mode, scope, t_sco
 
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
-        f.write("FairGRAPE-orig Weight Pruning Log (impt_type=4)\n")
+        f.write(f"FairGRAPE-orig Weight Pruning Log (impt_type={getattr(_config, 'glo_impt_type', None) or 4})\n")
+        if getattr(_config, 'glo_impt_type', None) == 6:
+            f.write(f"  target_attr  : {_config.glo_experiment_metadata['targets'][0]}\n")
         f.write(f"  dataset      : {getattr(_config, 'glo_dataset', None)}\n")
         f.write(f"  seed         : {getattr(_config, 'glo_seed', None)}\n")
         f.write(f"  iteration    : {prune_iter + 1}\n")

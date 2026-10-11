@@ -21,9 +21,26 @@ pruner_map = {'WS': WS, "SNIP": SNIP, 'GraSP': GraSP, "Lottery": Lottery, "FairG
 
 
 def experiment(args):
+    if args.impt == 7:
+        from celeba_taylor_experiment import run
+        return run(args)
+    if any(option.startswith('--taylor_') for option in getattr(args, '_explicit_options', [])):
+        raise ValueError('--taylor_* options require --impt 7')
     import prune
     from channel_cap import validate_layer_remove_ratio
     import config
+    if getattr(args, 'delta_p', None) is None:
+        args.delta_p = 0 if args.impt == 6 else 0.5
+    if getattr(args, 'fg_scope', None) is None:
+        args.fg_scope = 'all' if args.impt == 6 else 'blocks'
+    if args.impt not in (5, 6) and (getattr(args, 'target_attr', None)
+            or getattr(args, 'single_attr_eval_only', False)
+            or getattr(args, 'single_attr_smoke_samples', 0)
+            or getattr(args, 'single_attr_run_dir', None)):
+        raise ValueError('Single-attribute options require --impt 5 or 6')
+    if args.impt in (5, 6):
+        from celeba_single_experiment import run
+        return run(args)
     strict_cap = validate_layer_remove_ratio(getattr(args, "impt2_layer_max_remove_ratio", None))
     if strict_cap is not None:
         if args.prune_type != "FairGRAPE" or args.impt != 2:
@@ -924,16 +941,24 @@ def experiment(args):
         save_impt_df(cfgs)
 
 
-if __name__ == "__main__":
-
+def build_parser():
     parser = argparse.ArgumentParser(description='Parameters for pruning experiments')
-    parser.add_argument('--impt2_alpha', type=float, default=None, help='Override impt_type=2 alpha for this run; omission preserves the existing default')
+    parser.add_argument('--impt2_alpha', type=float, default=None, help='Override impt_type=2/5 alpha for this run; omission preserves the existing default')
     parser.add_argument('--impt2_layer_max_remove_ratio', type=float, default=None,
-        help='impt=2: strict maximum fraction of live channels removed per block per iteration (0,1]; omitted = original behavior; never relaxes the cap')
+        help='impt=2/5: strict maximum fraction of live channels removed per block per iteration (0,1]; omitted = original behavior; never relaxes the cap')
+    parser.add_argument('--target_attr', help='impt=5/6/7: one required CelebA prediction attribute')
+    parser.add_argument('--celeba_partition_file', default='csv/list_eval_partition.txt')
+    parser.add_argument('--celeba_csv', default='csv/CelebA.csv')
+    parser.add_argument('--celeba_image_root', default='Images/CelebA/img_align_celeba')
+    parser.add_argument('--single_attr_run_dir', default=None)
+    parser.add_argument('--single_attr_eval_only', action='store_true',
+        help='impt=5/6/7: evaluate a validated selected checkpoint on official Test without training/pruning')
+    parser.add_argument('--single_attr_smoke_samples', type=int, default=0,
+        help='impt=5/6/7 validation only: samples per official split; >=4, one dense epoch, separate checkpoint contract')
     parser.add_argument('--lfwa_csv', default='csv/LFWA.csv')
     parser.add_argument('--lfwa_image_root', default='Images/LFWA')
     parser.add_argument('--lfwa_run_dir', default=None)
-    parser.add_argument('--defer_test', action='store_true', help='LFWA: evaluate Test only after experiment selection is complete')
+    parser.add_argument('--defer_test', action='store_true', help='LFWA/impt=5/6/7: defer Test evaluation while selecting experiment settings')
 
     parser.add_argument('--checkpoint', type=str, default=None, help='학습된 모델 파일(.pth)의 경로')  # 이미 학습된 모델이 있다면 해당 경로를 지정
     parser.add_argument('--dataset', type=str, default='FairFace', help='학습 및 평가에 사용할 데이터셋 이름')
@@ -949,18 +974,27 @@ if __name__ == "__main__":
     parser.add_argument('--keep_per_iter', type=float, default=0.9, help='반복적 가지치기에서 단계별로 남길(유지할) 파라미터 비율')
     parser.add_argument('--lr_decay_iter', type=int, default=15, help='학습률을 감소시킬 주기(반복 횟수 또는 에폭)')
     parser.add_argument('--batch', type=int, default=64, help='데이터 로더에서 사용할 미니배치 크기')
-    parser.add_argument('--impt', type=int, default=0, help='가지치기 중요도(importance) 점수를 계산하는 방식 (0, 1, 2 등)')
+    parser.add_argument('--impt', type=int, default=0, help='5=single-attribute channel, 6=original FairGRAPE, 7=online Taylor-FO-BN (all backbone convolutions)')
+    parser.add_argument('--taylor_epochs', type=int, default=25, help='impt=7: total online pruning + fixed-mask fine-tuning epochs')
+    parser.add_argument('--taylor_lr', type=float, default=0.001, help='impt=7: initial SGD learning rate (10x decay after epochs 10 and 20)')
+    parser.add_argument('--taylor_frequency', type=int, default=30, help='impt=7: training minibatches between pruning events')
+    parser.add_argument('--taylor_prune_fraction', type=float, default=0.02, help='impt=7: fraction of initial neurons removed per event (ceil)')
+    parser.add_argument('--taylor_ema', type=float, default=0.9, help='impt=7: importance EMA coefficient')
+    parser.add_argument('--taylor_score_mode', choices=['auto', 'train', 'frozen_bn'], default='auto',
+                        help='impt=7: auto uses separate frozen-BN scoring for MobileNetV2, training gradients for ResNet-18')
+    parser.add_argument('--taylor_collapse_guard', choices=['auto', 'on', 'off'], default='auto',
+                        help='impt=7: rollback/stop on input-independent outputs; auto enables for MobileNetV2')
     parser.add_argument('--save_impt', action='store_true', help='출력 모델의 중요도 점수를 파일로 저장할지 여부')
     parser.add_argument('--para_batch', type=int, default=1, help='FairGRAPE 방식에서 race group 업데이트 전 선택할 파라미터 묶음의 크기')
     parser.add_argument('--stop_batch', type=int, default=10000, help='중요도 계산에 사용할 미니배치의 최대 개수')
     parser.add_argument('--exp_idx', type=int, default=0, help='여러 실험을 구분하기 위한 인덱스')
     parser.add_argument('--no_init_train', action='store_true', help='초기 학습 과정을 생략할지 여부')
     parser.add_argument('--drop_race', type=int, nargs='*', default=0, help='제거할 인종 번호(1~4=White/Black/Asian/Indian, 11~14=해당 인종만 유지). 여러 개 지정 가능: --drop_race 3 4')
-    parser.add_argument('--no_retrain', action='store_true', help='가지치기 후 재학습 과정을 생략할지 여부')
-    parser.add_argument('--save_mask', action='store_true', help='가지치기 마스크를 .npy 파일 형태로 저장할지 여부')
+    parser.add_argument('--no_retrain', action='store_true', help='모든 가지치기 후 마지막 추가 재학습만 생략 (각 단계의 --retrain_iter와 독립)')
+    parser.add_argument('--save_mask', action='store_true', help='가지치기 마스크 저장 (impt=5/6/7은 .pt, 기존 경로는 .npy)')
     parser.add_argument('--print_acc', action='store_true', help='가지치기 및 파인튜닝 후 테스트 정확도를 표시할지 여부')
-    parser.add_argument('--delta_p', type=float, default=0.5, help='FairGRAPE 추가 파라미터')
-    parser.add_argument('--no_grl', action='store_true', help='재학습에서 GRL 기반 adversarial debiasing을 비활성화')
+    parser.add_argument('--delta_p', type=float, default=None, help='FairGRAPE 추가 파라미터 (impt=6 기본 0, 그 외 기본 0.5)')
+    parser.add_argument('--no_grl', action='store_true', help='학습·재학습에서 GRL 기반 adversarial debiasing을 비활성화')
     parser.add_argument('--seed', type=int, default=42, help='랜덤 시드 설정 (재현성 확보를 위함)')
     parser.add_argument('--save_model_iter', nargs='+', type=int, default=-1, help='특정 가지치기 iteration(또는 epoch)에 모델을 저장할지 여부')
     parser.add_argument('--skip_readable_check', action='store_true', help='dlib 기반 이미지 가독성 검사를 건너뜀')
@@ -969,19 +1003,44 @@ if __name__ == "__main__":
     parser.add_argument('--no_pretrained', action='store_true', help='ImageNet 사전학습 가중치 없이 무작위 초기화로 학습 (FSCL Dogs&Cats from-scratch 세팅). 결과 폴더·unpruned 모델 파일명에 _scratch 태그가 붙음')
     parser.add_argument('--scratch_lrs', type=str, default='1e-3,1e-4,1e-5', help='--no_pretrained 전용: 단계별 학습률 (쉼표 구분)')
     parser.add_argument('--scratch_epochs', type=str, default='40,10,10', help='--no_pretrained 전용: 단계별 에폭 수 (쉼표 구분, --scratch_lrs와 길이 동일)')
-    parser.add_argument('--score_only', action='store_true', help='저장된 프루닝 체크포인트(--checkpoint)의 채널별 성능/공정성 기여도만 재계산해 channel_pruning_logs/score_only_*/에 저장하고 종료 (프루닝·재학습·모델 저장 없음)')
-    parser.add_argument('--phi_analysis', action='store_true', help='impt_type=2에서 φ의 두 인자(activation gap, mean|activation grad|)를 채널별로 분리해 phi_component_analysis/에 통계·불일치 분석 로그를 저장')
-    parser.add_argument('--phi_gap_only', action='store_true', help='비교 실험용: impt_type=2에서 공정성 기여도 φ로 activation gap만 사용 (activation gradient를 곱하지 않음). 로그 폴더에 gaponly 태그가 붙음')
+    parser.add_argument('--score_only', action='store_true', help='체크포인트 중요도 재계산과 로그 저장만 수행 (impt=6은 원본 scoring/greedy 제안을 계산하고 버림; 학습·마스크 적용·모델 저장 없음)')
+    parser.add_argument('--phi_analysis', action='store_true', help='impt_type=2/5에서 φ의 두 인자(activation gap, mean|activation grad|)를 채널별로 분리해 phi_component_analysis/에 통계·불일치 분석 로그를 저장')
+    parser.add_argument('--phi_gap_only', action='store_true', help='비교 실험용: impt_type=2/5에서 공정성 기여도 φ로 activation gap만 사용 (activation gradient를 곱하지 않음). 로그 폴더에 gaponly 태그가 붙음')
     parser.add_argument('--perf_only', action='store_true',
-        help='impt_type=2/3: 공정성 기여도 φ를 쓰지 않고 성능 기여도 원시값만으로 전역 프루닝. 정규화 생략, alpha=1.0, gamma=0, floor=0, cap=None을 강제하고 φ 계산을 건너뜀 (baseline 실험 01/02용). 로그 폴더에 perfonly 태그가 붙음')
-    parser.add_argument('--fg_scope', type=str, default='blocks', choices=['blocks', 'all'],
-        help='impt_type=4(원본 FairGRAPE greedy): 프루닝 대상 범위. blocks=features.1~17 conv만(50개 Conv2d), all=모든 Conv2d+Linear(53개). 그 외 impt_type에서는 무시됨 (baseline 실험 03/04용)')
+        help='impt_type=2/3/5: 공정성 기여도 φ를 쓰지 않고 성능 기여도 원시값만으로 전역 프루닝. 정규화 생략, alpha=1.0, gamma=0, floor=0, cap=None을 강제하고 φ 계산을 건너뜀 (baseline 실험 01/02용). 로그 폴더에 perfonly 태그가 붙음')
+    parser.add_argument('--fg_scope', type=str, default=None, choices=['blocks', 'all'],
+        help='FairGRAPE 범위: impt=4 기본 blocks(features.1~17 conv), impt=6은 all(모든 Conv2d+Linear)만 지원')
 
 
 
     parser.add_argument('--fg_mode', choices=['clean', 'faithful', 'original'], default=None,
-        help='impt_type=4: original=원본 참조 함수 직접 실행(torch.topk 포함), faithful=원본 점수+NumPy greedy, clean=수정된 점수+NumPy greedy. 생략하면 prune.py의 FG_ORIG_MODE 사용')
+        help='impt=4: clean/faithful/original; impt=6은 original만 지원하며 생략해도 original 사용')
 
-    args = parser.parse_args()
+    return parser
 
-    experiment(args)
+
+def parse_args(argv=None):
+    import sys
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    # Preserve legacy defaults while distinguishing explicitly supplied legacy
+    # options, including '=value' and argparse's accepted abbreviations.
+    explicit = set()
+    for token in argv:
+        if token.startswith('--'):
+            parsed = parser._parse_optional(token)
+            if parsed and parsed[0] is not None:
+                explicit.add(parsed[1])
+    args._explicit_options = sorted(explicit)
+    if args.impt == 7:
+        if '--prune_rate' not in explicit:
+            args.prune_rate = 0.70
+        if '--batch' not in explicit:
+            args.batch = 256
+        args.no_grl = True
+    return args
+
+
+if __name__ == '__main__':
+    experiment(parse_args())
